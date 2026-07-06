@@ -1,0 +1,26 @@
+# Generated review files
+review.md
+review.org
+
+# Local per-folder settings (holds your username, credited name, QID)
+.credit-check.json
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python packaging output
+build/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store

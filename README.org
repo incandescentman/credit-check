@@ -1,0 +1,404 @@
+#+TITLE: Credit Check
+#+SUBTITLE: Find Commons files you photographed that are used on Wikipedia
+
+Credit Check is a free command-line tool from WikiPortraits for Wikimedia
+Commons photographers. It searches Wikipedia to find the articles that feature
+your photos, then adds those photos (or a subset you pick) to a category page on
+Wikimedia Commons — using a category name like =Photographs by Jay Dixit= — so
+you can easily keep track of which Wikipedia articles use your photos.
+
+That is the main workflow. If you also provide a subject category and Wikidata
+QID, Credit Check can put photos of you taken by other people in a separate
+review section.
+
+Run =credit-check= to start the guided command-line app. Credit Check writes a
+plain Markdown review file first, opens a local browser contact sheet so you
+can pick photos visually, and edits Commons only when you confirm =commit
+--go=. Photos of you taken by other people are a separate guided action.
+
+* What it does
+
+1. *Finds likely candidates.* Your uploads, plus any file whose
+   author/photographer field credits you. Uploading alone does not make a file
+   count as your photo.
+2. *Checks Wikipedia.* Keeps only files used on live Wikipedia articles, across
+   every language edition.
+3. *Spots the gaps.* Flags the ones missing =Category:Photographs by <you>=.
+4. *Sorts you from subjects.* Photos you took go one way. Photos that merely
+   depict you (shot by someone else) never land in your "Photographs by"
+   category, and can go to your own subject category instead.
+5. *Traces crops.* If a crop dropped your credit but still cites your original
+   file as its source, Credit Check follows the trail and claims it anyway.
+6. *Waits for your yes.* Nothing is edited until you tick a box.
+
+* Requirements
+
+- Python 3.8 or newer.
+- =questionary= and =prompt_toolkit=, installed automatically from
+  =pyproject.toml=, for guided menus and the optional terminal review.
+- A Wikimedia Commons account (to make edits).
+
+Check your Python:
+
+: python3 --version
+
+* Install
+
+From this checkout, install it as an editable command with pipx:
+
+: cd path/to/credit-check
+: pipx install --editable .
+
+Now =credit-check= runs from anywhere, and it uses the code in this repo while
+you iterate.
+
+Prefer not to install? Just run the script directly, using =python3 credit_check.py=
+in place of =credit-check= throughout this guide. Direct script mode still
+works without those interactive dependencies for direct commands and browser
+review, but guided menus and terminal review need them; the installed
+=credit-check= command has them.
+
+* Start
+
+Start the guided command-line app:
+
+: credit-check
+
+If this is your first run, it starts with setup: your Commons username, your
+credited name, and your photographer category. After that, it shows the current
+review status and puts the natural next action first: find your photos, review
+found photos, or add the photos you picked. If you add your Wikidata ID in
+Settings, a separate optional action appears for photos of you taken by other
+people.
+
+In guided mode, Credit Check uses the local review file automatically. After a
+scan, it opens the browser review instead of asking you which file to use. The
+Settings action saves your Commons username, credited name, and categories in
+[[file:.credit-check.json][.credit-check.json]] for this folder, so you do not have to re-enter them.
+
+* Direct commands
+
+You can also run each step directly.
+
+** Check the tool
+
+Run local parser and review-format checks:
+
+: credit-check self-test
+
+Run a read-only Commons smoke test:
+
+: credit-check smoke
+
+Neither command edits Commons.
+
+** Setup
+
+Set your identity once. Put this in your shell profile if you like:
+
+: export WIKI_USERNAME='Jaydixit'        # your Commons account
+: export WIKI_AUTHOR='Jay Dixit'         # your name as it appears in author fields
+
+That's enough to start. Optional extras:
+
+: export WIKI_BY_CATEGORY='Photographs by Jay Dixit'   # defaults to "Photographs by <author>"
+: export WIKI_OF_CATEGORY='Jay Dixit'                  # subject category, for photos that depict you
+: export WIKI_QID='Q12345'                             # your Wikidata id, enables depicts detection
+
+You can also pass any of these as flags (=--username=, =--author=, and so on),
+which override the environment.
+
+Markdown is the default review format. To use org-mode in this folder, create
+[[file:.credit-check.json][.credit-check.json]]:
+
+: {"review_format": "org"}
+
+You can also use that file for advanced defaults. Most people should never need
+these:
+
+#+begin_src json
+{
+  "review_format": "org",
+  "review_page_size": 20,
+  "min_uses": 1,
+  "english_only": false,
+  "match_user_page_source": true,
+  "trace_derivatives": true,
+  "source_depth": 2
+}
+#+end_src
+
+What those advanced preferences mean:
+
+- =min_uses= is a priority filter. The default =1= means "include any photo
+  live on at least one Wikipedia article." Raise it only if you want to review
+  the most-used photos first.
+- =match_user_page_source= also searches for file text that names
+  =User:<username>=. Credit Check already checks uploads and author/photographer
+  fields; this catches edge cases where a file credits your Commons user page
+  instead of your real name. It is on by default because the authorship check
+  still has to confirm the author/photographer field before anything goes into
+  your category.
+- =source_depth= controls crop tracing. A hop is one step from a crop back to
+  the file it came from. The default =2= covers an original and a crop-of-a-crop
+  without making the scan wander too far.
+
+** Workflow
+
+*** 1. Scan
+
+: credit-check scan
+
+This searches Commons, checks Wikipedia usage, classifies each file, and writes
+=review.md=. It prints a summary when it finishes, for example:
+
+: by  (photos you took, missing [[Category:Photographs by Jay Dixit]]): 207 photos, used 1480 times
+: ambiguous (authorship or category unclear): 0 photos
+
+The scan only puts photos in the review when they are missing the category it
+would add. If one of your photos is already in your photographer category, it is
+left out of =review.md=. Before editing, =commit --go= checks again and skips
+any page where the category is already present.
+
+The guided scan does not ask you to filter by popularity. It uses the normal
+default: any photo live on at least one Wikipedia article is eligible. It also
+keeps crop tracing on by default, following up to two source links so a
+crop-of-a-crop can still be connected to your original. In the guided app, scan
+then opens the browser review automatically.
+
+*** 2. Review and pick photos
+
+Open the local browser picker:
+
+: credit-check review review.md
+
+It opens a contact sheet at =127.0.0.1= with Commons thumbnails, category
+sections, search, visible review modes (=All=, =Selected=, and =Still deciding=),
+select-visible/select-all buttons, and links that open each file on Commons.
+Selected photos get a visible badge and left stripe so you can scan the page
+quickly. Use =Preview edits= to see the exact category edits for the photos
+you picked before you leave the browser. The page saves your choices back into
+=review.md= and shows the next command after saving. Use =Save and close= when
+you are done.
+
+Browser shortcuts:
+
+- =/= focuses search.
+- =Space= toggles the focused photo.
+- =o= opens the focused photo on Commons.
+- =s= saves your choices.
+
+To open the browser directly in selected-only mode:
+
+: credit-check review --selected review.md
+
+If Credit Check cannot open a browser from the current terminal, it falls back
+to the keyboard-only reviewer. If the review file contains ambiguous photos,
+the browser shows a count for them, but does not let you select them until you
+move them under a real category heading in =review.md=.
+
+Prefer the keyboard-only terminal reviewer?
+
+: credit-check review --terminal review.md
+
+The terminal reviewer shows one page of photos at a time, with hotkeys visible
+at the top of the screen:
+
+- =Space= toggles the highlighted photo.
+- Arrow keys move through the list.
+- =n= and =p= move to the next or previous page.
+- =m= selects the current page; =c= clears the current page.
+- =a= selects all photos; =u= clears all photos.
+- =o= opens the highlighted photo on Commons.
+- =g= opens the current page as a browser contact sheet.
+- =v= opens the full review as a browser contact sheet.
+- =s= saves your choices; =q= quits without saving.
+
+Both review modes edit the same plain Markdown file, so you can still inspect
+or edit it directly.
+
+=review.md= is split into sections, one per category, plus an Ambiguous section
+for anything unclear:
+
+: # Add to [Category:Photographs by Jay Dixit] - photos you took (207)
+: ## [148] Jessie Buckley ... (Cropped & Centered).jpg
+:
+: - [ ] File:Jessie Buckley ... (Cropped & Centered).jpg
+:   [open on Commons](https://commons.wikimedia.org/...) - uploader Indopug - credited
+:   cats: Jessie Buckley, WikiPortraits at 2025 TIFF
+:   live: en, af, ar, az, bg, bn, ca, da, +29
+
+The number in brackets is how many Wikipedia articles use that photo, sorted
+most-used first. The browser and terminal reviewers toggle those =[X]= marks
+for you. If you edit the file by hand, tick =[X]= on the files you want to
+categorize and leave =[ ]= to skip.
+
+Two things worth knowing:
+
+- Each =# Add to [Category:...]= heading sets the category for the photos under
+  it. Move a photo to a different section and it goes to that category instead.
+- Files under =# Ambiguous= are never edited automatically. To categorize one,
+  move it up under a real heading, then tick it.
+
+*** 3. Plan
+
+This never logs in — it just prints the edits it would make:
+
+: credit-check plan review.md
+
+You can also preview the same edits inside the browser review with
+=Preview edits=.
+
+*** 4. Commit
+
+When the plan looks right, make the edits:
+
+: credit-check commit review.md --go
+
+Credit Check logs in, re-checks each file (skipping any already categorized),
+and appends the category with a clear edit summary, pausing a few seconds
+between edits. When it finishes, it shows how many photos were added, already
+present, or failed, links to the category page, and tells you whether any
+unchecked photos remain in =review.md=.
+
+* Making edits: the bot password
+
+Editing needs a login. Don't use your main password. Create a bot password, a
+scoped, revocable credential:
+
+1. Go to https://commons.wikimedia.org/wiki/Special:BotPasswords
+2. Create one (name it something like =categorize=). Grant *Edit existing pages*.
+3. You'll get a username like =Jaydixit@categorize= and a generated password.
+
+Give them to Credit Check by environment variable:
+
+: export COMMONS_BOTUSER='Jaydixit@categorize'
+: export COMMONS_BOTPASS='the-generated-password'
+
+If you skip this, =commit --go= will prompt you for them.
+
+* Useful options
+
+On =scan=:
+
+| Option              | What it does                                              |
+|---------------------+----------------------------------------------------------|
+| =--english-only=    | Only count English Wikipedia usage                       |
+| =--min-uses N=      | Only flag photos on at least N articles                  |
+| =--of-category '<name>'= | Also collect photos of you in this category        |
+| =--qid Q12345=      | Use Wikidata "depicts" to find photos of you             |
+| =--insource-user=   | Also match files whose source names your user page |
+| =--no-insource-user= | Skip that user-page source search                 |
+| =--no-derivatives=  | Skip crop/source-chain tracing                           |
+| =--depth N=         | How many source hops to follow (default 2)               |
+| =--review-format FMT= | One-run override for =markdown= or =org=               |
+| =--out FILE=        | Write the review somewhere other than =review.md=        |
+
+On =commit=:
+
+| Option           | What it does                                     |
+|------------------+--------------------------------------------------|
+| =--go=           | Actually edit (default is a dry run)             |
+| =--throttle S=   | Seconds between edits (default 5)                |
+| =--summary '...'= | Custom edit summary                             |
+
+Other commands:
+
+| Command            | What it does                                      |
+|--------------------+---------------------------------------------------|
+| =self-test=        | Runs local parser and review-format checks        |
+| =smoke=            | Runs a read-only Commons smoke test               |
+| =interactive=      | Starts the guided command-line app                |
+| =review REVIEW=    | Opens the local browser picker for your photos    |
+| =review --selected REVIEW= | Opens the browser on your selected photos |
+| =web REVIEW=       | Same browser picker, kept as an explicit alias    |
+| =plan REVIEW=      | Prints planned edits for the photos you checked   |
+
+* Finding photos that depict you
+
+By default Credit Check ignores photos of you: a portrait someone else shot
+won't be filed under "Photographs by you." In the guided app, choose =Find
+photos of you by other people= after adding your Wikidata ID in Settings. If you
+use direct commands and have a Wikidata item, point the tool at it:
+
+: credit-check scan --of-category 'Jay Dixit' --qid Q12345
+
+Files that Commons structured data says depict you (and that you didn't shoot)
+land in their own section. If you pick them, Credit Check adds them to your
+subject category.
+
+* Good Commons manners
+
+Credit Check is built to be a considerate editor, and you should run it like
+one:
+
+- Nothing is edited unless you pick it. Dry run is the default.
+- It appends only. It never rewrites a page, reorders categories, or touches
+  license, author, or description fields.
+- It re-checks every file right before editing, so it won't add a duplicate.
+- It throttles between edits and backs off while fetching or logging in if
+  Commons asks it to slow down.
+- It does not blindly retry edit submissions after a lost network response; it
+  reports that file as failed so you can re-run safely after checking the page.
+- Every edit carries a transparent summary naming the category it added.
+
+If you're about to categorize hundreds of files, that's a semi-automated batch.
+Skim the Commons norms for that kind of work, and if you're doing it regularly,
+consider whether a bot flag or a quick note to the community is warranted. For a
+one-time cleanup of your own photos, a normal login is generally fine.
+
+* When something goes wrong
+
+- *"Missing --username (or WIKI_USERNAME)"*: set your identity (see Setup).
+- *"rate-limited, waiting Ns..."*: normal. Commons throttled you; the tool
+  waits and retries discovery, fetch, and login requests on its own.
+- *"! failed (network)"*: the edit response was lost or failed. The tool did
+  not resubmit the edit automatically, to avoid double-appending a category.
+  Check the file page or re-run the plan before trying again.
+- *"Login failed"*: check your bot password, and that you granted it "Edit
+  existing pages."
+- *A scan feels slow*: it's fetching usage and wikitext for hundreds of
+  files. Let it run; it prints progress as it goes.
+
+* What it won't do
+
+It won't upload files, edit Wikipedia articles, rewrite your metadata, add
+event or location categories, or edit anything without your say-so. Its job is
+narrow on purpose: get your Wikipedia-used photos into your photographer
+category.
+
+* The payoff
+
+When you're done, your work is collected at one URL you can point anyone to:
+
+: https://commons.wikimedia.org/wiki/Category:Photographs_by_Jay_Dixit
+
+If your photo is on Wikipedia and Commons already credits you, Credit Check
+makes sure it shows up in your category.
+
+* About WikiPortraits
+
+WikiPortraits is a global network of volunteer photographers on a mission to
+deliver high-quality, freely licensed portraits to
+[[https://en.wikipedia.org/wiki/Main_Page][Wikipedia]],
+[[https://commons.wikimedia.org/wiki/Main_Page][Wikimedia Commons]], and the
+world.
+
+Wikipedia and its sister Wikimedia projects require freely licensed images, but
+most published photos of notable people are press shots under full copyright, so
+countless biographies are stuck with low-quality photos or none at all.
+WikiPortraits changes that: our volunteer photographers go where notable people
+gather — film festivals, conferences, and award ceremonies — often as
+credentialed press. At many events we also run a photo booth, where anyone with
+a Wikipedia page, speaker or not, can drop by for a portrait. Every shot is
+freely licensed, uploaded to Wikimedia Commons, and free for the world to use.
+
+Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia
+articles in over 150 languages, viewed more than 150 million times a month.
+Among the events our photographers have captured: Sundance Film Festival, SXSW,
+Cannes Film Festival, Edinburgh Festival Fringe, Venice Film Festival, Toronto
+International Film Festival, the Nobel Prizes, CES, and the Pulitzer Prizes.
+
+* Author
+
+Credit Check was built by Jay Dixit ([[mailto:jay@wikiportraits.org][jay@wikiportraits.org]]).
