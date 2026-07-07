@@ -1,14 +1,14 @@
 #+TITLE: Credit Check
 
-/Find Commons files you photographed that are used on Wikipedia/
+/Find and track which of your photos are being featured on Wikipedia/
 
 [[https://img.shields.io/badge/License-MIT-2e7d4f.svg]]
 [[https://img.shields.io/badge/Python-3.8%2B-3776ab.svg]]
 [[https://img.shields.io/badge/from-WikiPortraits-0e6b45.svg]]
 
-Credit Check is a free command-line tool from WikiPortraits for Wikimedia
-Commons photographers. It searches Wikipedia to find the articles that feature
-your photos, then adds those photos (or a subset you pick) to a category page on
+Credit Check is a free guided tool from WikiPortraits for Wikimedia Commons
+photographers. It searches Wikipedia to find the articles that feature your
+photos, then adds those photos (or a subset you pick) to a category page on
 Wikimedia Commons — using a category name like =Photographs by Jay Dixit= — so
 you can easily keep track of which Wikipedia articles use your photos.
 
@@ -22,7 +22,7 @@ pipx install credit-check     # or: pip install credit-check
 credit-check                  # start the guided app, then follow the prompts
 #+end_src
 
-Credit Check walks you through the rest: set up your Commons account once, find
+Credit Check walks you through the rest: save your Commons details once, find
 your photos, pick the ones to add, and add them to your photographer category.
 
 * Why this exists
@@ -62,13 +62,8 @@ Credit Check.
 * Requirements
 
 - Python 3.8 or newer.
-- =questionary= and =prompt_toolkit=, installed automatically from
-  =pyproject.toml=, for guided menus and the optional terminal review.
+- The guided app dependencies, installed automatically with Credit Check.
 - A Wikimedia Commons account (to make edits).
-
-Check your Python:
-
-: python3 --version
 
 * Install
 
@@ -78,71 +73,58 @@ Install from PyPI with pipx:
 
 =credit-check= runs from anywhere. (=pip install credit-check= works too.)
 
-Prefer to run from source? Clone the repo and install it instead:
-
-: git clone https://github.com/incandescentman/credit-check.git
-: cd credit-check
-: pipx install .
-
-Add =--editable= if you plan to modify the code.
-
-Prefer not to install? Just run the script directly, using =python3 credit_check.py=
-in place of =credit-check= throughout this guide. Direct script mode still
-works without those interactive dependencies for direct commands and browser
-review, but guided menus and terminal review need them; the installed
-=credit-check= command has them.
+Advanced installation options are covered in the Reference section below.
 
 * Start
 
-Start the guided command-line app:
+Start the guided app:
 
 : credit-check
 
-If this is your first run, it starts with setup: your Commons username, your
-credited name, and your photographer category. After that, it shows where you're
-up to and offers the obvious next step first: find your photos, choose photos to
-add, or add the photos you picked. A separate optional action is always
-available for photos of you taken by other people; it looks up matching
-Wikidata items by your name when you choose it.
+If this is your first run, it asks for the details it needs: your Commons
+username, your credited name, and your photographer category. After that, it
+shows where you're up to and offers the obvious next step first: find your
+photos, choose photos to add, or add the photos you picked. A separate optional
+action is always available for photos of you taken by other people; it looks up
+matching Wikidata items by your name when you choose it.
 
 In guided mode, Credit Check keeps track of the found photos automatically.
-After a scan, it opens the browser photo picker instead of asking you which file
-to use. The Settings action saves your Commons username, credited name, and
-photographer category in [[file:.credit-check.json][.credit-check.json]] for this folder, so you do
-not have to re-enter them. To use the same folder for someone else, choose
-=Start over with a different photographer=; it clears saved details and the
-photos found so far, then asks for the new photographer and searches again.
+After it searches, it opens the browser photo picker automatically. The Settings
+action saves your Commons username, credited name, and photographer category for
+this folder, so you do not have to re-enter them. To use the same folder for
+someone else, choose =Start over with a different photographer=; it clears saved
+details and the photos found so far, then asks for the new photographer and
+searches again.
 
 * Making edits: the bot password
 
 Editing needs a login. Don't use your main password. Create a bot password, a
-scoped, revocable credential:
+scoped, revocable app password for your own Commons account:
 
 1. Go to https://commons.wikimedia.org/wiki/Special:BotPasswords
-2. Create one (name it something like =categorize=). Grant *Edit existing pages*.
-3. You'll get a username like =Jaydixit@categorize= and a generated password.
+2. Log in there with your normal Wikimedia Commons username and password.
+3. Commons will prompt you to create a bot password. Name it something like
+   =categorize=.
+4. Grant *Edit existing pages*.
+5. You'll get a username like =Jaydixit@categorize= and a generated password.
+6. Come back to Credit Check and enter that generated username and password.
 
-Give them to Credit Check by environment variable:
+That generated username is not a separate Commons account. It is your account
+plus a suffix that names this credential. A login like =Jaydixit@categorize=
+still edits as =Jaydixit=, and Credit Check does not upload files or change who
+uploaded them; it only edits existing file pages to add categories.
 
-: export COMMONS_BOTUSER='Jaydixit@categorize'
-: export COMMONS_BOTPASS='the-generated-password'
-
-If you skip this, =commit --go= will prompt you for them.
+The point is to avoid giving any tool your main Commons password. If this
+credential ever leaks, you can revoke or reset just this bot password.
 
 * Finding photos that depict you
 
-Credit Check only files photos you took — a portrait someone else shot won't be
-filed under "Photographs by you." For photos of you taken by other people, choose
-=Find photos of you by other people= in the guided app; Credit Check looks up
-matching Wikidata items so you can pick yourself, or skip cleanly if none of them
-are you. If you use direct
-commands and have a Wikidata item, point the tool at it:
-
-: credit-check scan --of-category 'Jay Dixit' --qid Q12345
-
-Files that Commons structured data says depict you (and that you didn't shoot)
-land in their own section. If you pick them, Credit Check adds them to your
-category for photos of you.
+Credit Check's main flow is for photos you took. It also has an additional
+feature for photos of you taken by other people: choose =Find photos of you by
+other people= in the guided app, and Credit Check looks up matching Wikidata
+items so you can pick yourself or skip cleanly if none of them are you. Files
+that Commons structured data says depict you land in their own section. If you
+pick them, Credit Check adds them to your category for photos of you.
 
 * Good Commons manners
 
@@ -165,16 +147,16 @@ one-time cleanup of your own photos, a normal login is generally fine.
 
 * When something goes wrong
 
-- *"Missing --username (or WIKI_USERNAME)"*: set your identity (see Environment
-  variables and config).
+- *Credit Check says details are missing*: choose =Settings= and enter your Commons
+  username, credited name, and photographer category.
 - *"rate-limited, waiting Ns..."*: normal. Commons throttled you; the tool
   waits and retries discovery, fetch, and login requests on its own.
 - *"! failed (network)"*: the edit response was lost or failed. The tool did
   not resubmit the edit automatically, to avoid double-appending a category.
-  Check the file page or re-run the plan before trying again.
-- *"Login failed"*: check your bot password, and that you granted it "Edit
-  existing pages."
-- *A scan feels slow*: it's fetching usage and wikitext for hundreds of
+  Check the file page, then try adding the selected photos again.
+- *"Login failed"*: check the generated bot-password username and password, and
+  that you granted it "Edit existing pages."
+- *A search feels slow*: it's fetching usage and wikitext for hundreds of
   files. Let it run; it prints progress as it goes.
 
 * What it won't do
@@ -225,6 +207,21 @@ Credit Check was built by Jay Dixit ([[mailto:jay@wikiportraits.org][jay@wikipor
 The guided =credit-check= app covers everything above. The sections below are
 for scripting and power users who want to run each step by hand.
 
+** Install alternatives
+
+Prefer to run from source? Clone the repo and install it instead:
+
+: git clone https://github.com/incandescentman/credit-check.git
+: cd credit-check
+: pipx install .
+
+Add =--editable= if you plan to modify the code.
+
+Prefer not to install? Run the script directly, using =python3 credit_check.py=
+in place of =credit-check= for the direct commands below. Direct script mode
+works for direct commands and browser review; guided menus and terminal review
+need the packaged dependencies that the installed =credit-check= command has.
+
 ** Check the tool
 
 Run local parser and review-format checks:
@@ -237,29 +234,33 @@ Run a read-only Commons smoke test:
 
 Neither command edits Commons.
 
-** Environment variables and config
+** Command-line workflow
 
-Set your identity once. Put this in your shell profile if you like:
+For advanced users, Credit Check also supports direct commands for each step of
+the workflow. This is useful for scripting, debugging, custom review files, or
+running one stage at a time. If you just want the normal experience, run
+=credit-check= and use the guided app instead.
+
+*** Optional shortcuts for direct-command users
+
+The guided app already collects the ordinary details it needs and saves them for
+this folder. You do not need environment variables for the normal flow.
+
+If you're scripting direct commands, you can provide the same identity values as
+flags (=--username=, =--author=, and so on) or as environment variables:
 
 : export WIKI_USERNAME='Jaydixit'        # your Commons account
 : export WIKI_AUTHOR='Jay Dixit'         # your name as it appears in author fields
 
-That's enough to start. Optional extras:
+Optional extras:
 
 : export WIKI_BY_CATEGORY='Photographs by Jay Dixit'   # defaults to "Photographs by <author>"
 : export WIKI_OF_CATEGORY='Jay Dixit'                  # category for photos of you
 : export WIKI_QID='Q12345'                             # your Wikidata id, enables depicts detection
 
-You can also pass any of these as flags (=--username=, =--author=, and so on),
-which override the environment.
-
-Markdown is the default review format. To use org-mode in this folder, create
-[[file:.credit-check.json][.credit-check.json]]:
-
-: {"review_format": "org"}
-
-You can also use that file for advanced defaults. Most people should never need
-these:
+Direct-command users can also put advanced defaults in
+[[file:.credit-check.json][.credit-check.json]]. This is optional; the guided app
+manages ordinary settings for you.
 
 #+begin_src json
 {
@@ -288,8 +289,6 @@ What those advanced preferences mean:
   the file it came from. The default =2= covers an original and a crop-of-a-crop
   without following long source chains.
 
-** Command-line workflow
-
 *** 1. Scan
 
 : credit-check scan
@@ -302,14 +301,12 @@ This searches Commons, checks Wikipedia usage, classifies each file, and writes
 
 The scan only puts photos in the review when they are missing the category it
 would add. If one of your photos is already in your photographer category, it is
-left out of =review.md=. Before editing, =commit --go= checks again and skips
-any page where the category is already present.
+left out of =review.md=. When you run the direct =commit --go= step, Credit
+Check checks again and skips any page where the category is already present.
 
-The guided scan does not ask you to filter by popularity. It uses the normal
-default: any photo live on at least one Wikipedia article is eligible. It also
-keeps crop tracing on by default, following up to two source links so a
-crop-of-a-crop can still be connected to your original. In the guided app, scan
-then opens the browser review automatically.
+By default, any photo live on at least one Wikipedia article is eligible. Crop
+tracing is on by default too, following up to two source links so a
+crop-of-a-crop can still be connected to your original.
 
 *** 2. Review and pick photos
 

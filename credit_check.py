@@ -8,9 +8,9 @@ ones you pick. Works for any photographer, not one hard-coded person.
 
 It scans your own uploads as candidates, and reaches past them: any file whose
 *author/photographer field* credits you is found too, which includes cropped
-derivatives re-uploaded by other people. It also tells apart photos you took
-from photos of you taken by someone else, so a portrait of you by another
-photographer never lands in "Photographs by <you>".
+derivatives re-uploaded by other people. It also has an additional feature for
+finding photos of you taken by other people, kept separate for your photos-of-you
+category.
 
 WORKFLOW
     Run `credit-check` to start the guided command-line app, or use commands:
@@ -28,10 +28,8 @@ CONFIG (flags override environment and local preferences)
     .credit-check.json / --review-format   markdown by default; set org locally
 
 EXAMPLES
-    export WIKI_USERNAME='Jaydixit'
-    export WIKI_AUTHOR='Jay Dixit'
     credit-check                              # guided mode
-    credit-check scan
+    credit-check scan --username 'Jaydixit' --author 'Jay Dixit'
     credit-check scan --of-category 'Jay Dixit' --qid Q12345
     credit-check review review.md             # pick photos in your browser
     credit-check review --terminal review.md  # keyboard-only terminal review
@@ -42,15 +40,18 @@ EXAMPLES
 
 CREDENTIALS (commit --go only)
     Make a bot password at https://commons.wikimedia.org/wiki/Special:BotPasswords
-    with "Edit existing pages", then:
-        export COMMONS_BOTUSER='Jaydixit@categorize'
-        export COMMONS_BOTPASS='the-generated-password'
+    with "Edit existing pages". This is an app password for your own Commons
+    account, not a separate uploader. A login like Jaydixit@categorize still
+    edits as Jaydixit. If credentials are missing, Credit Check explains the
+    steps and prompts for the generated username and password. Direct-command
+    users can also pass --botuser/--botpass or set COMMONS_BOTUSER and
+    COMMONS_BOTPASS.
 
 questionary and prompt_toolkit provide the installed command's interactive UI;
 direct script mode falls back to plain prompts if they are unavailable.
 """
 
-import argparse, getpass, html, http.cookiejar, http.server, io, json, os, re, shlex, sys, tempfile, threading, time, webbrowser
+import argparse, builtins, getpass, html, http.cookiejar, http.server, io, json, os, re, shlex, shutil, sys, tempfile, textwrap, threading, time, webbrowser
 import urllib.parse, urllib.request, urllib.error
 
 try:
@@ -2450,14 +2451,76 @@ def approved_or_exit(review):
         sys.exit(1)
     return approved
 
+def photo_count(n):
+    return "%d photo%s" % (n, "" if n == 1 else "s")
+
+def display_file_title(title):
+    if title.startswith("File:"):
+        return title[len("File:"):]
+    return title
+
+def grouped_approved(approved):
+    groups = []
+    by_category = {}
+    for title, cat in approved:
+        if cat not in by_category:
+            by_category[cat] = []
+            groups.append((cat, by_category[cat]))
+        by_category[cat].append(title)
+    return groups
+
+def approved_categories(approved):
+    return [cat for cat, _titles in grouped_approved(approved)]
+
+def approved_category_urls(approved):
+    return [(cat, commons_category_url(cat)) for cat in approved_categories(approved)]
+
+def output_width():
+    return max(72, min(shutil.get_terminal_size((100, 20)).columns, 120))
+
+def print_wrapped_line(prefix, text, width=None):
+    width = width or output_width()
+    body_width = max(24, width - len(prefix))
+    lines = textwrap.wrap(
+        text, width=body_width, break_long_words=False,
+        break_on_hyphens=False) or [""]
+    print(prefix + lines[0])
+    follow = " " * len(prefix)
+    for line in lines[1:]:
+        print(follow + line)
+
+def print_category_preview(approved):
+    for cat, titles in grouped_approved(approved):
+        print("")
+        print("Category:%s" % cat)
+        number_width = len(str(len(titles)))
+        for idx, title in enumerate(titles, start=1):
+            print_wrapped_line("  %*d. " % (number_width, idx),
+                               display_file_title(title))
+
+def format_seconds(seconds):
+    if seconds == int(seconds):
+        seconds = int(seconds)
+    if seconds == 1:
+        return "1 second"
+    return "%s seconds" % seconds
+
+def progress_prefix(index, total, status):
+    return "  %*d/%d  %-13s " % (len(str(total)), index, total, status)
+
+def print_progress_line(index, total, status, title, detail=None):
+    text = display_file_title(title)
+    if detail:
+        text += " (%s)" % detail
+    print_wrapped_line(progress_prefix(index, total, status), text)
+
 def print_plan(approved, review, next_command=None, guided=False):
     if guided:
-        print("%d photo(s) selected." % len(approved))
+        print("%s selected." % photo_count(len(approved)))
     else:
-        print("%d photo(s) selected in %s." % (len(approved), review))
-    print("Preview - here's what would change (nothing is edited yet):")
-    for t, cat in approved:
-        print("   + [[Category:%s]]  ->  %s" % (cat, t))
+        print("%s selected in %s." % (photo_count(len(approved)), review))
+    print("Preview - Commons edits (nothing is edited yet):")
+    print_category_preview(approved)
     if next_command:
         print("\nRun %s to make these edits." % next_command)
 
@@ -2483,26 +2546,32 @@ def clear_review_selections(review):
     return True
 
 def guided_selection_clear_message():
-    return "Those photos are no longer selected, so you won't add them twice."
+    return "The selected photos are now unchecked, so you won't add them twice."
 
 def print_commit_done_summary(added, skipped, failed, review, approved, guided=False):
     print("")
-    print("Done.")
-    print("  Added category to %d photo(s)." % added)
-    print("  Already present: %d" % skipped)
+    if failed:
+        print("Done, with a few problems to check.")
+    elif added:
+        print("Congratulations - your selected photos have been added to your Wikimedia Commons category.")
+    elif skipped:
+        print("Good news - your selected photos were already in your Wikimedia Commons category.")
+    else:
+        print("Done.")
+    print("")
+    print("  Added: %d" % added)
+    print("  Already there: %d" % skipped)
     print("  Failed: %d" % failed)
 
-    cats = []
-    seen = set()
-    for _title, cat in approved:
-        if cat not in seen:
-            seen.add(cat)
-            cats.append(cat)
-    if cats:
+    cat_urls = approved_category_urls(approved)
+    if cat_urls:
         print("")
-        print("Category page%s:" % ("" if len(cats) == 1 else "s"))
-        for cat in cats:
-            print("  %s" % commons_category_url(cat))
+        if len(cat_urls) == 1:
+            print("You can view your photos here:")
+        else:
+            print("You can view your category pages here:")
+        for _cat, url in cat_urls:
+            print("  %s" % url)
 
     remaining = remaining_unselected_count(review)
     if failed:
@@ -2515,7 +2584,7 @@ def print_commit_done_summary(added, skipped, failed, review, approved, guided=F
     elif remaining:
         print("")
         if guided:
-            print("%d photos you did not select remain. Choose \"Choose photos to add\" when you want to keep going." %
+            print("%d unselected photos remain. Choose \"Choose photos to add\" when you want to keep going." %
                   remaining)
         else:
             print("%d photos you did not select remain. Run credit-check review %s when you want to keep going." %
@@ -2524,10 +2593,82 @@ def print_commit_done_summary(added, skipped, failed, review, approved, guided=F
         print("")
         print("All your selected photos are now categorized.")
 
+def offer_open_category_pages(approved):
+    cat_urls = approved_category_urls(approved)
+    if not cat_urls:
+        return
+    if len(cat_urls) == 1:
+        label = "Open this category page now?"
+    else:
+        label = "Open these category pages now?"
+    if not prompt_yes_no(label, True):
+        return
+    for _cat, url in cat_urls:
+        webbrowser.open(url)
+    if len(cat_urls) == 1:
+        print("Opened %s" % cat_urls[0][1])
+    else:
+        print("Opened %d category pages." % len(cat_urls))
+
 def cmd_plan(args):
     approved = approved_or_exit(args.review)
     print_plan(approved, args.review,
                "credit-check commit %s --go" % review_path_arg(args.review))
+
+BOT_PASSWORD_URL = "https://commons.wikimedia.org/wiki/Special:BotPasswords"
+
+def bot_password_intro_lines():
+    return [
+        "Credit Check needs a Wikimedia Commons bot password before it can edit.",
+        "",
+        "A bot password is an app password for your own Commons account, not a separate uploader.",
+        "A login like YourName@categorize still edits as YourName; the suffix just names this tool's credential.",
+        "Credit Check only edits existing file pages to add categories. It does not upload files or change who uploaded them.",
+        "",
+        "To create one:",
+        "  1. Go to %s" % BOT_PASSWORD_URL,
+        "  2. Log in there with your normal Wikimedia Commons username and password.",
+        "  3. Create a new bot password. Name it something like categorize.",
+        "  4. Grant \"Edit existing pages\".",
+        "  5. Copy the generated username, like YourName@categorize, and the generated password.",
+        "  6. Come back here and paste them below.",
+        "",
+        "Do not use your main Commons password.",
+        "",
+    ]
+
+def print_bot_password_intro():
+    print("\n".join(bot_password_intro_lines()))
+
+def default_bot_username():
+    username = identity_default("username", "WIKI_USERNAME")
+    if username:
+        return "%s@categorize" % username
+    return None
+
+def prompt_secret_required(label):
+    while True:
+        value = getpass.getpass(label + ": ")
+        if value:
+            return value
+        print("Required.")
+
+def resolve_commit_credentials(args):
+    botuser = args.botuser or os.environ.get("COMMONS_BOTUSER")
+    botpass = args.botpass or os.environ.get("COMMONS_BOTPASS")
+
+    if not botuser or not botpass:
+        print_bot_password_intro()
+
+    if not botuser:
+        botuser = prompt_text(
+            "Generated bot-password username",
+            default_bot_username(),
+            required=True)
+    if not botpass:
+        botpass = prompt_secret_required("Generated bot-password password")
+
+    return botuser, botpass
 
 def cmd_commit(args):
     approved = approved_or_exit(args.review)
@@ -2537,45 +2678,57 @@ def cmd_commit(args):
         return
 
     if getattr(args, "guided", False):
-        print("%d photo(s) selected." % len(approved))
+        if not getattr(args, "preview_shown", False):
+            print("%s selected." % photo_count(len(approved)))
     else:
-        print("%d photo(s) selected in %s." % (len(approved), args.review))
+        print("%s selected in %s." % (photo_count(len(approved)), args.review))
 
-    botuser = args.botuser or os.environ.get("COMMONS_BOTUSER") \
-        or input("Bot username (e.g. Jaydixit@categorize): ").strip()
-    botpass = args.botpass or os.environ.get("COMMONS_BOTPASS") \
-        or getpass.getpass("Bot password: ")
+    botuser, botpass = resolve_commit_credentials(args)
 
     cl = Client()
     csrf = login(cl, botuser, botpass)
-    print("Logged in. Adding categories, pausing a few seconds between edits...\n")
+    print("Logged in. Adding categories on Wikimedia Commons.")
+    print("Pausing %s between edits." % format_seconds(args.throttle))
 
     added = skipped = failed = 0
-    for t, cat in approved:
+    progress = 0
+    total = len(approved)
+    for cat, titles in grouped_approved(approved):
         full = "Category:" + cat
-        d = cl.get({"action": "query", "titles": t, "prop": "categories",
-                    "clcategories": full, "cllimit": "1"})
-        page = next(iter(d["query"]["pages"].values()))
-        if page.get("categories"):
-            print("  = already in [[%s]], skip: %s" % (full, t)); skipped += 1; continue
-        try:
-            res = cl.post({"action": "edit"},
-                          {"title": t, "appendtext": "\n[[%s]]\n" % full,
-                           "summary": args.summary + " ([[%s]])" % full, "token": csrf,
-                           "assert": "user", "nocreate": "1", "maxlag": "5"})
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            print("  ! failed (network): %s (%s)" % (t, e)); failed += 1
+        print("")
+        print(full)
+        for t in titles:
+            progress += 1
+            d = cl.get({"action": "query", "titles": t, "prop": "categories",
+                        "clcategories": full, "cllimit": "1"})
+            page = next(iter(d["query"]["pages"].values()))
+            if page.get("categories"):
+                print_progress_line(progress, total, "Already there", t)
+                skipped += 1
+                continue
+            try:
+                res = cl.post({"action": "edit"},
+                              {"title": t, "appendtext": "\n[[%s]]\n" % full,
+                               "summary": args.summary + " ([[%s]])" % full, "token": csrf,
+                               "assert": "user", "nocreate": "1", "maxlag": "5"})
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+                print_progress_line(progress, total, "Failed", t, "network: %s" % e)
+                failed += 1
+                time.sleep(args.throttle)
+                continue
+            if res.get("edit", {}).get("result") == "Success":
+                print_progress_line(progress, total, "Added", t)
+                added += 1
+            else:
+                print_progress_line(progress, total, "Failed", t, str(res))
+                failed += 1
             time.sleep(args.throttle)
-            continue
-        if res.get("edit", {}).get("result") == "Success":
-            print("  + %s  ->  %s" % (full, t)); added += 1
-        else:
-            print("  ! failed: %s -> %s" % (t, res)); failed += 1
-        time.sleep(args.throttle)
     print_commit_done_summary(added, skipped, failed, args.review, approved,
                               guided=getattr(args, "guided", False))
     if getattr(args, "guided", False) and not failed and clear_review_selections(args.review):
         print(guided_selection_clear_message())
+    if getattr(args, "guided", False) and not failed:
+        offer_open_category_pages(approved)
 
 
 # ---------------------------------------------------------------- self-checks
@@ -2977,7 +3130,18 @@ def check_guided_copy_messages():
                 "Credit Check found photos, but couldn't tell which category to use for them, so there are no photos to choose yet.")
     check_equal("guided no-double-add message",
                 guided_selection_clear_message(),
-                "Those photos are no longer selected, so you won't add them twice.")
+                "The selected photos are now unchecked, so you won't add them twice.")
+    intro = "\n".join(bot_password_intro_lines())
+    if "not a separate uploader" not in intro:
+        raise AssertionError("bot password intro lost account ownership explanation")
+    if "still edits as YourName" not in intro:
+        raise AssertionError("bot password intro lost edit attribution explanation")
+    if "Do not use your main Commons password." not in intro:
+        raise AssertionError("bot password intro lost main-password warning")
+    if "Log in there with your normal Wikimedia Commons username and password." not in intro:
+        raise AssertionError("bot password intro lost Commons login step")
+    if "Come back here and paste them below." not in intro:
+        raise AssertionError("bot password intro lost return-to-tool step")
 
     old_stdout = sys.stdout
     old_prompt_yes_no = globals()["prompt_yes_no"]
@@ -3648,6 +3812,67 @@ def check_commit_summary_helpers():
     check_equal("category url",
                 commons_category_url("Photographs by Test Person"),
                 "https://commons.wikimedia.org/wiki/Category:Photographs_by_Test_Person")
+    approved = [
+        ("File:Alpha photo.jpg", "Photographs by Test Person"),
+        ("File:Beta portrait.jpg", "Photographs by Test Person"),
+    ]
+    old_stdout = sys.stdout
+    old_prompt_yes_no = globals()["prompt_yes_no"]
+    old_browser_open = webbrowser.open
+    try:
+        sys.stdout = io.StringIO()
+        print_plan(approved, "review.md", guided=True)
+        plan_output = sys.stdout.getvalue()
+        if "Preview - Commons edits (nothing is edited yet):" not in plan_output:
+            raise AssertionError("commit preview title missing")
+        if "Category:Photographs by Test Person" not in plan_output:
+            raise AssertionError("commit preview category header missing")
+        if "Alpha photo.jpg" not in plan_output or "File:Alpha" in plan_output:
+            raise AssertionError("commit preview did not clean file titles")
+        if "[[Category:" in plan_output or " -> " in plan_output:
+            raise AssertionError("commit preview kept old wiki-link arrow layout")
+
+        sys.stdout = io.StringIO()
+        print_progress_line(1, 12, "Already there", "File:Alpha photo.jpg")
+        progress_output = sys.stdout.getvalue()
+        if "1/12" not in progress_output or "Already there" not in progress_output:
+            raise AssertionError("commit progress status missing")
+        if "File:Alpha" in progress_output:
+            raise AssertionError("commit progress did not clean file titles")
+
+        sys.stdout = io.StringIO()
+        print_commit_done_summary(2, 1, 0, "missing-review.md", approved, guided=True)
+        done_output = sys.stdout.getvalue()
+        for needle in (
+                "Congratulations - your selected photos have been added",
+                "You can view your photos here:",
+                "https://commons.wikimedia.org/wiki/Category:Photographs_by_Test_Person",
+                "Added: 2",
+                "Already there: 1",
+                "Failed: 0"):
+            if needle not in done_output:
+                raise AssertionError("commit success output missing %r" % needle)
+
+        prompts = []
+        opened = []
+
+        def yes_open(label, default=False):
+            prompts.append((label, default))
+            return True
+
+        globals()["prompt_yes_no"] = yes_open
+        webbrowser.open = lambda url: opened.append(url)
+        sys.stdout = io.StringIO()
+        offer_open_category_pages(approved)
+        check_equal("open category prompt", prompts,
+                    [("Open this category page now?", True)])
+        check_equal("opened category url", opened,
+                    ["https://commons.wikimedia.org/wiki/Category:Photographs_by_Test_Person"])
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_yes_no"] = old_prompt_yes_no
+        webbrowser.open = old_browser_open
+
     by_list, of_list, amb_list, meta = sample_review_data()
     with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
         path = os.path.join(td, "review.md")
@@ -3662,6 +3887,62 @@ def check_commit_summary_helpers():
                     parse_approved(path, warn=False), [])
         check_equal("clearing unselected review is a no-op",
                     clear_review_selections(path), False)
+
+def check_commit_credential_prompts():
+    old_cwd = os.getcwd()
+    old_env = {key: os.environ.get(key) for key in (
+        "COMMONS_BOTUSER", "COMMONS_BOTPASS", "WIKI_USERNAME", PLAIN_PROMPTS_ENV)}
+    old_input = builtins.input
+    old_getpass = getpass.getpass
+    old_stdout = sys.stdout
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            for key in ("COMMONS_BOTUSER", "COMMONS_BOTPASS", "WIKI_USERNAME"):
+                os.environ.pop(key, None)
+            os.environ[PLAIN_PROMPTS_ENV] = "1"
+
+            save_local_preferences({"username": "SavedUser"})
+            prompts = []
+
+            def accept_default(prompt):
+                prompts.append(prompt)
+                return ""
+
+            builtins.input = accept_default
+            getpass.getpass = lambda prompt: "generated-secret"
+            sys.stdout = io.StringIO()
+            botuser, botpass = resolve_commit_credentials(
+                argparse.Namespace(botuser=None, botpass=None))
+            check_equal("bot username accepts default", botuser,
+                        "SavedUser@categorize")
+            check_equal("bot password prompt result", botpass, "generated-secret")
+            if "Generated bot-password username [SavedUser@categorize]" not in prompts[0]:
+                raise AssertionError("bot username prompt did not show saved default")
+
+            save_local_preferences({"username": None})
+            answers = iter(["", "TypedUser@categorize"])
+
+            def blank_then_value(prompt):
+                prompts.append(prompt)
+                return next(answers)
+
+            builtins.input = blank_then_value
+            sys.stdout = io.StringIO()
+            botuser, _botpass = resolve_commit_credentials(
+                argparse.Namespace(botuser=None, botpass="secret"))
+            check_equal("bot username blank without default loops", botuser,
+                        "TypedUser@categorize")
+    finally:
+        sys.stdout = old_stdout
+        builtins.input = old_input
+        getpass.getpass = old_getpass
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        os.chdir(old_cwd)
 
 def check_web_review_save():
     by_list, of_list, amb_list, meta = sample_review_data()
@@ -3954,6 +4235,7 @@ def cmd_self_test(args):
     run_check("local browser review save", check_web_review_save, failures)
     run_check("local browser stale-save guard", check_web_review_stale_save, failures)
     run_check("commit completion helpers", check_commit_summary_helpers, failures)
+    run_check("commit credential prompts", check_commit_credential_prompts, failures)
     run_check("Markdown terminal review toggle", lambda: write_toggle_sample("markdown", ".md"), failures)
     run_check("org terminal review toggle", lambda: write_toggle_sample("org", ".org"), failures)
     run_check("interactive selected-photo loading", check_load_approved_nonexit, failures)
@@ -4425,7 +4707,8 @@ def interactive_preview_and_commit():
         return
     args = argparse.Namespace(review=review, go=True, summary=(
         "Add photographer or photos-of-you category"),
-        throttle=5.0, botuser=None, botpass=None, guided=True)
+        throttle=5.0, botuser=None, botpass=None, guided=True,
+        preview_shown=True)
     cmd_commit(args)
 
 def interactive_commit():
@@ -4598,7 +4881,7 @@ try:
     import importlib.metadata as _metadata
     __version__ = _metadata.version("credit-check")
 except Exception:
-    __version__ = "1.1.0"
+    __version__ = "1.1.6"
 
 
 def main():
