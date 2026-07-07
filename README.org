@@ -22,8 +22,29 @@ pipx install credit-check     # or: pip install credit-check
 credit-check                  # start the guided app, then follow the prompts
 #+end_src
 
-That's it. Credit Check walks you through the rest: set up your Commons account
-once, find your photos, pick the ones to add, and add them to your category.
+Credit Check walks you through the rest: set up your Commons account once, find
+your photos, pick the ones to add, and add them to your category.
+
+* Why this exists
+
+If you're a Wikimedia Commons photographer, chances are some of your photos are
+already being used on Wikipedia — maybe dozens or hundreds of them, across
+articles in languages you don't even read. But there's no built-in way to see
+which ones. Wikipedia happily uses your work; it just never tells you where.
+
+The standard fix is to gather your photos into a Commons category — something
+like =Photographs by Jay Dixit= — so they all live at one URL you can track, and
+one page where other editors can find more of your work. But if you're like many
+Wikipedia photographers, with hundreds of photos scattered across articles in
+dozens of languages, adding each one by hand is slow, tedious work.
+
+Credit Check automates it. It finds the photos you took that Wikipedia is
+actually using, and adds the ones you pick to your category — so you can finally
+see, in one place, where your photos are used on Wikipedia.
+
+I made this for my fellow WikiPortraits photographers. Wikipedians are
+volunteers, so the least we can do is give credit where credit's due. That's why
+I built Credit Check.
 
 * What it does
 
@@ -54,8 +75,7 @@ Install from PyPI with pipx:
 
 : pipx install credit-check
 
-That's it — =credit-check= now runs from anywhere. (=pip install credit-check=
-works too.)
+=credit-check= runs from anywhere. (=pip install credit-check= works too.)
 
 Prefer to run from source? Clone the repo and install it instead:
 
