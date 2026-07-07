@@ -16,14 +16,14 @@ WORKFLOW
     Run `credit-check` to start the guided command-line app, or use commands:
     1. scan     -> writes review.md
     2. review   -> pick photos in your browser, terminal, or editor
-    3. plan     -> dry-run the checked edits
+    3. plan     -> preview the checked edits
     4. commit   -> logs in and adds the right category to each photo you checked
 
 CONFIG (flags override environment and local preferences)
     --username     / WIKI_USERNAME      your Commons account (the uploader name)
     --author       / WIKI_AUTHOR        your name as it appears in author fields
     --by-category  / WIKI_BY_CATEGORY   default: "Photographs by <author>"
-    --of-category  / WIKI_OF_CATEGORY   subject category for photos that depict you
+    --of-category  / WIKI_OF_CATEGORY   category for photos of you
     --qid          / WIKI_QID           your Wikidata id (e.g. Q42) for depicts (P180)
     .credit-check.json / --review-format   markdown by default; set org locally
 
@@ -35,7 +35,7 @@ EXAMPLES
     credit-check scan --of-category 'Jay Dixit' --qid Q12345
     credit-check review review.md             # pick photos in your browser
     credit-check review --terminal review.md  # keyboard-only terminal review
-    credit-check plan review.md               # dry run: shows the plan
+    credit-check plan review.md               # preview: shows what would change
     credit-check commit review.md --go         # actually edits
 
     (Not installed? Run it directly: python3 credit_check.py scan)
@@ -50,7 +50,7 @@ questionary and prompt_toolkit provide the installed command's interactive UI;
 direct script mode falls back to plain prompts if they are unavailable.
 """
 
-import argparse, getpass, html, http.cookiejar, http.server, json, os, re, shlex, sys, tempfile, threading, time, webbrowser
+import argparse, getpass, html, http.cookiejar, http.server, io, json, os, re, shlex, sys, tempfile, threading, time, webbrowser
 import urllib.parse, urllib.request, urllib.error
 
 try:
@@ -71,6 +71,7 @@ except ImportError:
     Window = None
 
 API = "https://commons.wikimedia.org/w/api.php"
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 UA = "credit-check/2.0 (Commons photographer self-categorization; run by file owner)"
 TITLE_BATCH = 50
 WEB_REVIEW_HOST = "127.0.0.1"
@@ -79,7 +80,8 @@ WEB_REVIEW_HOST = "127.0.0.1"
 # ---------------------------------------------------------------- HTTP client
 
 class Client:
-    def __init__(self):
+    def __init__(self, api=API):
+        self.api = api
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(self.jar))
@@ -87,7 +89,7 @@ class Client:
 
     def _call(self, params, data=None, tries=6, retry_post=False):
         params = {**params, "format": "json"}
-        url = API + "?" + urllib.parse.urlencode(params)
+        url = self.api + "?" + urllib.parse.urlencode(params)
         body = urllib.parse.urlencode(data).encode() if data else None
         may_retry = (body is None) or retry_post
         for attempt in range(tries):
@@ -108,6 +110,50 @@ class Client:
     def get(self, params):          return self._call(params)
     def post(self, params, data, retry_post=False):
         return self._call(params, data=data, retry_post=retry_post)
+
+
+# ---------------------------------------------------------------- Wikidata lookup
+
+MANUAL_QID_CHOICE = "__manual_qid__"
+SKIP_QID_CHOICE = "__skip_qid__"
+
+def parse_wikidata_candidates(data):
+    candidates = []
+    for item in data.get("search", []):
+        qid = item.get("id")
+        if not qid:
+            continue
+        candidates.append({
+            "id": qid,
+            "label": item.get("label") or qid,
+            "description": item.get("description") or "",
+        })
+    return candidates
+
+def fetch_wikidata_candidates(name):
+    cl = Client(WIKIDATA_API)
+    data = cl.get({
+        "action": "wbsearchentities",
+        "search": name,
+        "type": "item",
+        "language": "en",
+        "limit": "7",
+    })
+    return parse_wikidata_candidates(data)
+
+def wikidata_candidate_label(candidate):
+    label = candidate["label"]
+    if candidate.get("description"):
+        label += " — " + candidate["description"]
+    return "%s (%s)" % (label, candidate["id"])
+
+def normalize_qid_input(value):
+    if not value:
+        return None
+    m = re.search(r"\b(Q\d+)\b", value.strip(), re.I)
+    if m:
+        return m.group(1).upper()
+    return value.strip()
 
 
 # ---------------------------------------------------------------- discovery
@@ -370,6 +416,23 @@ PREFERENCE_FILE = ".credit-check.json"
 REVIEW_FORMAT_ALIASES = {"md": "markdown", "markdown": "markdown",
                          "org": "org", "org-mode": "org", "orgmode": "org"}
 
+def atomic_write_text(path, text):
+    # Write beside the target so os.replace is atomic on the same filesystem.
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".credit-check-write.", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 def normalize_review_format(value):
     fmt = (value or "markdown").strip().lower()
     if fmt not in REVIEW_FORMAT_ALIASES:
@@ -427,9 +490,7 @@ def save_local_preferences(updates):
             prefs.pop(key, None)
         else:
             prefs[key] = value
-    with open(PREFERENCE_FILE, "w", encoding="utf-8") as f:
-        json.dump(prefs, f, indent=2, sort_keys=True)
-        f.write("\n")
+    atomic_write_text(PREFERENCE_FILE, json.dumps(prefs, indent=2, sort_keys=True) + "\n")
 
 def identity_default(pref_name, env_name, default=None):
     return os.environ.get(env_name) or preference_value(pref_name, default=default)
@@ -529,7 +590,7 @@ def write_markdown(by_list, of_list, amb_list, meta, path):
     L.append("")
     L.append("    credit-check review %s" % review_path_arg(path))
     L.append("")
-    L.append("Or tick `[X]` manually next to the photos you want, then dry-run and commit:")
+    L.append("Or tick `[X]` manually next to the photos you want, then preview and commit:")
     L.append("")
     L.append("    credit-check plan %s" % review_path_arg(path))
     L.append("    credit-check commit %s --go" % review_path_arg(path))
@@ -556,7 +617,7 @@ def write_markdown(by_list, of_list, amb_list, meta, path):
         L.append("")
         for t, rec in sort_review_items(amb_list): L += markdown_item_block(t, rec)
 
-    open(path, "w", encoding="utf-8").write("\n".join(L))
+    atomic_write_text(path, "\n".join(L))
 
 def write_org(by_list, of_list, amb_list, meta, path):
     L = []
@@ -568,7 +629,7 @@ def write_org(by_list, of_list, amb_list, meta, path):
     L.append("")
     L.append("# Pick photos in the browser:")
     L.append("#   credit-check review %s" % review_path_arg(path))
-    L.append("# Or tick [X] manually next to the photos you want, then dry-run and commit:")
+    L.append("# Or tick [X] manually next to the photos you want, then preview and commit:")
     L.append("#   credit-check plan %s" % review_path_arg(path))
     L.append("#   credit-check commit %s --go" % review_path_arg(path))
     L.append("# Each '* Add to [[Category:...]]' heading sets the category for the photos under it.")
@@ -592,7 +653,7 @@ def write_org(by_list, of_list, amb_list, meta, path):
         L.append("")
         for t, rec in sort_review_items(amb_list): L += org_item_block(t, rec)
 
-    open(path, "w", encoding="utf-8").write("\n".join(L))
+    atomic_write_text(path, "\n".join(L))
 
 def write_review(by_list, of_list, amb_list, meta, path, review_format):
     if review_format == "org":
@@ -691,8 +752,7 @@ def set_review_approvals(path, items, selected_lines):
                              lines[item["line"]].rstrip())
         mark = "X" if item["line"] in selected_lines else " "
         lines[item["line"]] = "%s[%s]%s%s" % (m.group(1), mark, m.group(3), m.group(4))
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    atomic_write_text(path, "".join(lines))
 
 def review_item_title(item):
     uses = "[%d] " % item["uses"] if item["uses"] is not None else ""
@@ -797,7 +857,8 @@ def review_items_signature(items):
     return [(item["line"], item["title"], item["target"], item["checked"])
             for item in items]
 
-def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all"):
+def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
+                    guided=False):
     if initial_mode not in ("all", "selected", "unselected"):
         initial_mode = "all"
     items_json = json.dumps(web_review_payload(approvable), ensure_ascii=True).replace(
@@ -808,6 +869,7 @@ def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all"):
         "</", "<\\/")
     ambiguous_json = json.dumps(ambiguous_count)
     initial_mode_json = json.dumps(initial_mode)
+    guided_json = json.dumps(bool(guided))
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -889,11 +951,6 @@ h1 {
   margin-top: 6px;
   color: var(--muted);
   font-weight: 650;
-}
-.review-path {
-  color: var(--faint);
-  font-size: 13px;
-  overflow-wrap: anywhere;
 }
 .save-actions {
   display: flex;
@@ -1008,9 +1065,6 @@ main {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-}
-.preview-panel[hidden] {
-  display: none;
 }
 .preview-header {
   display: flex;
@@ -1285,44 +1339,40 @@ a {
         <div class="summary" id="summary"></div>
       </div>
       <div class="save-actions">
-        <button type="button" class="secondary" data-action="preview">Preview edits</button>
-        <button type="button" class="primary" data-action="save-close">Save and close</button>
-        <button type="button" class="ghost" data-action="save">Save</button>
+        <button type="button" class="primary" data-action="done">Done</button>
       </div>
     </div>
-    <div class="review-path" id="review-path"></div>
     <div class="toolbar-row primary-tools">
       <input id="search" type="search" autocomplete="off" placeholder="Filter by filename, category, or use count">
       <div class="mode-tabs" role="group" aria-label="Review mode">
         <button type="button" data-mode="all">All</button>
         <button type="button" data-mode="selected">Selected</button>
-        <button type="button" data-mode="unselected">Still deciding</button>
+        <button type="button" data-mode="unselected">Not selected yet</button>
       </div>
     </div>
     <div class="toolbar-row bulk-tools">
-      <button type="button" class="secondary" data-action="select-visible">Select visible</button>
-      <button type="button" class="secondary" data-action="clear-visible">Clear visible</button>
+      <button type="button" class="secondary" data-action="select-visible">Select shown</button>
+      <button type="button" class="secondary" data-action="clear-visible">Unselect shown</button>
       <button type="button" class="secondary" data-action="select-all">Select all</button>
-      <button type="button" class="secondary" data-action="clear-all">Clear all</button>
-      <span class="keyboard-hint">Shortcuts: / search, Space select, o open, s save</span>
+      <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
+      <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
     </div>
     <div class="status" id="status" role="status" aria-live="polite"></div>
   </div>
 </header>
 <main>
-  <section class="preview-panel" id="preview-panel" hidden>
+  <section class="preview-panel" id="preview-panel">
     <div class="preview-header">
       <div>
-        <h2>Preview edits</h2>
+        <h2>Commons edits</h2>
         <p id="preview-summary"></p>
       </div>
-      <button type="button" class="ghost" data-action="hide-preview">Hide preview</button>
     </div>
     <pre class="preview-edits" id="preview-edits"></pre>
     <p class="next-command" id="next-command"></p>
   </section>
   <div class="notice" id="ambiguous-note"></div>
-  <div class="empty" id="empty">No photos match this filter.</div>
+  <div class="empty" id="empty">No photos match this view.</div>
   <div class="sections" id="sections" aria-label="Photos"></div>
 </main>
 <script>
@@ -1331,11 +1381,12 @@ window.CREDIT_CHECK_REVIEW_ARG = __REVIEW_ARG_JSON__;
 window.CREDIT_CHECK_ITEMS = __ITEMS_JSON__;
 window.CREDIT_CHECK_AMBIGUOUS_COUNT = __AMBIGUOUS_JSON__;
 window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
+window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
 (() => {
-  const reviewPath = window.CREDIT_CHECK_REVIEW;
   const reviewArg = window.CREDIT_CHECK_REVIEW_ARG;
   const ambiguousCount = window.CREDIT_CHECK_AMBIGUOUS_COUNT;
+  const guidedMode = Boolean(window.CREDIT_CHECK_GUIDED);
   const items = window.CREDIT_CHECK_ITEMS.map((item) => ({
     ...item,
     selected: Boolean(item.checked),
@@ -1348,7 +1399,6 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
   const modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
   const screenTitle = document.getElementById("screen-title");
   const ambiguousNote = document.getElementById("ambiguous-note");
-  const previewPanel = document.getElementById("preview-panel");
   const previewSummary = document.getElementById("preview-summary");
   const previewEdits = document.getElementById("preview-edits");
   const nextCommand = document.getElementById("next-command");
@@ -1358,8 +1408,10 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
     ? window.CREDIT_CHECK_INITIAL_MODE
     : "all";
   let lastFocusedLine = items.length ? items[0].line : null;
+  let saveTimer = null;
+  let pendingSave = false;
+  let selectionRevision = 0;
 
-  document.getElementById("review-path").textContent = reviewPath;
   if (singleTarget) {
     screenTitle.textContent = `Review photos for Category:${targets[0]}`;
   } else {
@@ -1367,7 +1419,7 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
   }
   if (ambiguousCount > 0) {
     const noun = ambiguousCount === 1 ? "photo was" : "photos were";
-    ambiguousNote.textContent = `${ambiguousCount} ambiguous ${noun} not shown here. Edit review.md to move them under a category before selecting them.`;
+    ambiguousNote.textContent = `${ambiguousCount} ambiguous ${noun} skipped because Credit Check couldn't choose a category.`;
     ambiguousNote.classList.add("show");
   }
 
@@ -1468,31 +1520,38 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
     return items.filter((item) => item.selected);
   }
 
+  function selectedLines() {
+    return selectedItems().map((item) => item.line);
+  }
+
+  function savePayload(closeAfter) {
+    return {
+      selected_lines: selectedLines(),
+      close: Boolean(closeAfter),
+      revision: selectionRevision,
+    };
+  }
+
+  function nextStepText() {
+    if (guidedMode) {
+      return "You're all set - close this and choose Add selected photos to your category page on Wikimedia Commons from the menu.";
+    }
+    return `Next: credit-check commit ${reviewArg} --go`;
+  }
+
   function renderPreview() {
     const selected = selectedItems();
     if (!selected.length) {
-      previewSummary.textContent = "No selected photos yet.";
-      previewEdits.textContent = "Pick photos above, then preview the category edits here.";
+      previewSummary.textContent = "No photos selected yet.";
+      previewEdits.textContent = "Select photos to see the category edits here.";
       nextCommand.textContent = "";
       return;
     }
-    previewSummary.textContent = `${selected.length} ${selected.length === 1 ? "edit" : "edits"} ready for Commons.`;
+    previewSummary.textContent = `${selected.length} ${selected.length === 1 ? "category edit" : "category edits"} ready for Commons.`;
     previewEdits.textContent = selected.map((item) =>
       `+ [[Category:${item.target}]]  ->  ${item.title}`
     ).join("\\n");
-    nextCommand.textContent = `After saving, run: credit-check commit ${reviewArg} --go`;
-  }
-
-  function showPreview(setStatus = true) {
-    renderPreview();
-    previewPanel.hidden = false;
-    if (setStatus) {
-      const count = selectedItems().length;
-      status.textContent = count
-        ? `Previewing ${count} selected photos.`
-        : "No selected photos yet.";
-    }
-    previewPanel.scrollIntoView({ block: "nearest" });
+    nextCommand.textContent = nextStepText();
   }
 
   function render() {
@@ -1501,25 +1560,33 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
     updateSummary(visible);
     empty.classList.toggle("show", visible.length === 0);
     sections.innerHTML = groupItems(visible).map(sectionHtml).join("");
-    if (!previewPanel.hidden) renderPreview();
+    renderPreview();
   }
 
   function setSelection(lines, value) {
     const lineSet = new Set(lines);
+    let changed = false;
     items.forEach((item) => {
-      if (lineSet.has(item.line)) item.selected = value;
+      if (lineSet.has(item.line) && item.selected !== value) {
+        item.selected = value;
+        changed = true;
+      }
     });
-    status.textContent = "";
     render();
+    if (changed) {
+      selectionRevision += 1;
+      scheduleSave();
+    }
   }
 
   function toggleLine(line) {
     const item = items.find((candidate) => candidate.line === line);
     if (!item) return;
     item.selected = !item.selected;
+    selectionRevision += 1;
     lastFocusedLine = line;
-    status.textContent = "";
     render();
+    scheduleSave();
     const card = document.querySelector(`.photo[data-line="${line}"]`);
     if (card) card.focus({ preventScroll: true });
   }
@@ -1541,23 +1608,81 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
     if (item) window.open(item.file_url, "_blank", "noopener");
   }
 
-  async function save(closeAfter) {
+  function scheduleSave() {
+    pendingSave = true;
     status.textContent = "Saving...";
-    const selectedLines = items.filter((item) => item.selected).map((item) => item.line);
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+    }
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      save(false);
+    }, 500);
+  }
+
+  function flushPendingSaveBeacon() {
+    if (!pendingSave && !saveTimer) return;
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    pendingSave = false;
+    const body = JSON.stringify(savePayload(false));
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/save", new Blob([body], { type: "application/json" }));
+      return;
+    }
+    fetch("/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  }
+
+  function saveErrorMessage(error) {
+    const message = error && error.message ? error.message : String(error);
+    if (message.toLowerCase().includes("changed on disk")) {
+      return "Review changed on disk - reload the page.";
+    }
+    return `Save failed: ${message}`;
+  }
+
+  async function save(closeAfter) {
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    pendingSave = true;
+    status.textContent = "Saving...";
     try {
       const response = await fetch("/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selected_lines: selectedLines, close: closeAfter }),
+        body: JSON.stringify(savePayload(closeAfter)),
       });
       const data = await response.json();
       if (!response.ok || !data.ok) {
         throw new Error(data.error || response.statusText);
       }
-      status.textContent = `Saved ${data.selected} selected photos. Preview below, then run: credit-check commit ${reviewArg} --go`;
-      showPreview(false);
+      pendingSave = false;
+      renderPreview();
+      if (closeAfter) {
+        status.textContent = "Saved. Closing this tab...";
+        setTimeout(() => {
+          window.close();
+          setTimeout(() => {
+            status.textContent = "Saved. You can now close this tab.";
+          }, 400);
+        }, 50);
+        return true;
+      }
+      status.textContent = "Saved";
+      return true;
     } catch (error) {
-      status.textContent = `Save failed: ${error.message}`;
+      pendingSave = false;
+      status.textContent = saveErrorMessage(error);
+      return false;
     }
   }
 
@@ -1607,10 +1732,7 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
       return;
     }
     if (typing) return;
-    if (event.key === "s") {
-      event.preventDefault();
-      save(false);
-    } else if (event.key === "o") {
+    if (event.key === "o") {
       const line = focusedLine();
       if (line !== null) {
         event.preventDefault();
@@ -1637,24 +1759,21 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
   document.querySelector('[data-action="clear-all"]').addEventListener("click", () => {
     setSelection(items.map((item) => item.line), false);
   });
-  document.querySelector('[data-action="preview"]').addEventListener("click", () => showPreview(true));
-  document.querySelector('[data-action="hide-preview"]').addEventListener("click", () => {
-    previewPanel.hidden = true;
-  });
-  document.querySelector('[data-action="save"]').addEventListener("click", () => save(false));
-  document.querySelector('[data-action="save-close"]').addEventListener("click", () => save(true));
+  document.querySelector('[data-action="done"]').addEventListener("click", () => save(true));
   search.addEventListener("input", render);
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       currentMode = button.dataset.mode;
       status.textContent = currentMode === "selected"
-        ? "Showing only your selected photos."
+        ? "Showing only photos you selected."
         : currentMode === "unselected"
           ? "Showing photos you have not selected yet."
           : "";
       render();
     });
   });
+  window.addEventListener("beforeunload", flushPendingSaveBeacon);
+  window.addEventListener("pagehide", flushPendingSaveBeacon);
 
   render();
 })();
@@ -1665,14 +1784,17 @@ window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
         "__REVIEW_ARG_JSON__", review_arg_json).replace(
         "__ITEMS_JSON__", items_json).replace(
         "__AMBIGUOUS_JSON__", ambiguous_json).replace(
-        "__INITIAL_MODE_JSON__", initial_mode_json)
+        "__INITIAL_MODE_JSON__", initial_mode_json).replace(
+        "__GUIDED_JSON__", guided_json)
 
 class LocalReviewServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mode="all"):
-    page = web_review_html(review, approvable, ambiguous_count, initial_mode).encode("utf-8")
+def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mode="all",
+                       guided=False):
+    page = web_review_html(review, approvable, ambiguous_count, initial_mode,
+                           guided=guided).encode("utf-8")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -1725,27 +1847,53 @@ def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mod
                 raw = self.rfile.read(length).decode("utf-8")
                 data = json.loads(raw or "{}")
 
-                current_items = parse_review_items(review)
-                if review_items_signature(current_items) != self.server.review_signature:
-                    raise ReviewChangedError(
-                        "%s changed on disk. Reload the browser page before saving." %
-                        os.path.basename(review))
-                current_approvable = [item for item in current_items if item["target"]]
-                allowed_lines = {item["line"] for item in current_approvable}
+                close_after = bool(data.get("close"))
+                with self.server.review_lock:
+                    revision = data.get("revision")
+                    if revision is not None:
+                        revision = int(revision)
+                        if revision < self.server.review_client_revision:
+                            current_items = parse_review_items(review)
+                            selected_count = len([
+                                item for item in current_items
+                                if item["target"] and item["checked"]
+                            ])
+                            self.server.saved_count = selected_count
+                            self.send_json(200, {
+                                "ok": True,
+                                "selected": selected_count,
+                                "stale": True,
+                            })
+                            if close_after:
+                                threading.Thread(
+                                    target=self.server.shutdown, daemon=True).start()
+                            return
 
-                selected = set()
-                for line in data.get("selected_lines", []):
-                    line = int(line)
-                    if line not in allowed_lines:
-                        raise ValueError("Unknown review item line: %s" % line)
-                    selected.add(line)
-                set_review_approvals(review, current_items, selected)
-                self.server.review_signature = review_items_signature(
-                    parse_review_items(review))
-                self.server.saved_count = len(selected)
-                self.send_json(200, {"ok": True, "selected": len(selected)})
-                if data.get("close"):
-                    threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    current_items = parse_review_items(review)
+                    if review_items_signature(current_items) != self.server.review_signature:
+                        raise ReviewChangedError(
+                            "%s changed on disk. Reload the browser page before saving." %
+                            os.path.basename(review))
+                    current_approvable = [
+                        item for item in current_items if item["target"]]
+                    allowed_lines = {item["line"] for item in current_approvable}
+
+                    selected = set()
+                    for line in data.get("selected_lines", []):
+                        line = int(line)
+                        if line not in allowed_lines:
+                            raise ValueError("Unknown review item line: %s" % line)
+                        selected.add(line)
+                    set_review_approvals(review, current_items, selected)
+                    self.server.review_signature = review_items_signature(
+                        parse_review_items(review))
+                    if revision is not None:
+                        self.server.review_client_revision = revision
+                    self.server.saved_count = len(selected)
+                    self.send_json(200, {"ok": True, "selected": len(selected)})
+                    if close_after:
+                        threading.Thread(
+                            target=self.server.shutdown, daemon=True).start()
             except ReviewChangedError as e:
                 self.send_json(409, {"ok": False, "error": str(e)})
             except ValueError as e:
@@ -1766,39 +1914,59 @@ def browser_review_should_fallback(no_open=False):
         return True
     return False
 
+def missing_review_message(guided=False):
+    if guided:
+        return "No photos found yet. Choose Find your photos on Wikipedia first."
+    return "Review file not found. Run credit-check scan first."
+
+def empty_review_message(guided=False):
+    if guided:
+        return "You're all caught up. Choose Scan again for new photos when you want to check again."
+    return "Your review is empty. Run credit-check scan again."
+
+def no_approvable_review_message(ambiguous_count, guided=False):
+    if ambiguous_count:
+        if guided:
+            return ("Credit Check found photos, but couldn't tell which category "
+                    "to use for them, so there are no photos to choose yet.")
+        return ("Credit Check found only ambiguous photos. Assign a category in "
+                "the review file before selecting them.")
+    return "No photos to choose right now." if guided else "No photos to review."
+
 def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=False,
-                    initial_mode="all"):
+                    initial_mode="all", guided=False):
     if not os.path.exists(review):
-        print("No review file found: %s. Choose Find your photos on Wikipedia first." % review)
+        print(missing_review_message(guided))
         return False
 
     items = parse_review_items(review)
     approvable = [item for item in items if item["target"]]
     ambiguous_count = len([item for item in items if not item["target"]])
     if not items:
-        print("%s has no photos in it. Run Find your photos on Wikipedia again." % review)
+        print(empty_review_message(guided))
         return True
     if not approvable:
-        if ambiguous_count:
-            print("%s only has ambiguous photos. Edit the review file to move any real matches under a category before selecting them." % review)
-        else:
-            print("No photos to review in %s." % review)
+        print(no_approvable_review_message(ambiguous_count, guided))
         return True
 
     server = LocalReviewServer(
         (WEB_REVIEW_HOST, port),
-        review_web_handler(review, items, approvable, ambiguous_count, initial_mode),
+        review_web_handler(review, items, approvable, ambiguous_count, initial_mode,
+                           guided=guided),
     )
     server.review_host = "%s:%d" % (WEB_REVIEW_HOST, server.server_address[1])
     server.review_origin = "http://%s" % server.review_host
     server.review_signature = review_items_signature(items)
+    server.review_lock = threading.Lock()
+    server.review_client_revision = -1
     server.saved_count = None
     url = server.review_origin + "/"
 
-    print("Opening local browser review for %d photo(s)." % len(approvable))
-    print("Review file: %s" % os.path.abspath(review))
+    print("Opening photo picker in your browser for %d photo(s)." % len(approvable))
+    if not guided:
+        print("Review file: %s" % os.path.abspath(review))
     print("URL: %s" % url)
-    print("Use Save and close in the browser, or press Ctrl-C here to stop.")
+    print("Use Done in the browser, or press Ctrl-C here to stop.")
 
     if open_browser:
         try:
@@ -1821,8 +1989,12 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
         server.server_close()
 
     if server.saved_count is not None:
-        print("%d photo(s) selected. Next: credit-check plan %s" %
-              (server.saved_count, review_path_arg(review)))
+        if guided:
+            print("%d photo(s) selected. Next: choose Add selected photos to your category page on Wikimedia Commons." %
+                  server.saved_count)
+        else:
+            print("%d photo(s) selected. Next: credit-check commit %s --go" %
+                  (server.saved_count, review_path_arg(review)))
     return True
 
 def review_page_items(approvable, page, page_size):
@@ -2066,7 +2238,12 @@ def cmd_scan(args):
              ("  of-cat=[[Category:%s]]" % of_cat) if of_cat else ""), file=sys.stderr)
     print("Discovering files...", file=sys.stderr)
     reasons = discover_titles(cl, username, author, insource_user)
-    print("  %d possible matches. Fetching usage, categories, wikitext..." % len(reasons),
+    candidate_count = len(reasons)
+    if candidate_count == 0:
+        print("  found no files for user %s - check your Commons username in Settings."
+              % username, file=sys.stderr)
+        return
+    print("  %d possible matches. Fetching usage, categories, wikitext..." % candidate_count,
           file=sys.stderr)
     info = fetch_details(cl, reasons.keys(), by_cat, of_cat)
 
@@ -2141,15 +2318,22 @@ def login(cl, botuser, botpass):
         sys.exit("Login failed: %s" % res.get("login", {}).get("result", res))
     return cl.get({"action": "query", "meta": "tokens"})["query"]["tokens"]["csrftoken"]
 
-def load_approved(review, warn=True):
+def load_approved(review, warn=True, guided=False):
     try:
         approved = parse_approved(review, warn=warn)
     except FileNotFoundError:
         if warn:
-            print("Review file not found: %s. Run credit-check scan first." % review)
+            if guided:
+                print(missing_review_message(guided=True))
+            else:
+                print("Review file not found: %s. Run credit-check scan first." % review)
         return []
     if not approved and warn:
-        print("You haven't selected any photos in %s yet. Open review and pick the photos you want first." % review)
+        if guided:
+            print("You haven't selected any photos yet.")
+        else:
+            print("You haven't selected any photos in %s yet. Run credit-check review %s and choose the photos you want first." %
+                  (review, review_path_arg(review)))
     return approved
 
 def approved_or_exit(review):
@@ -2158,9 +2342,12 @@ def approved_or_exit(review):
         sys.exit(1)
     return approved
 
-def print_plan(approved, review, next_command=None):
-    print("%d photo(s) selected in %s." % (len(approved), review))
-    print("Dry run. Planned edits:")
+def print_plan(approved, review, next_command=None, guided=False):
+    if guided:
+        print("%d photo(s) selected." % len(approved))
+    else:
+        print("%d photo(s) selected in %s." % (len(approved), review))
+    print("Preview - here's what would change (nothing is edited yet):")
     for t, cat in approved:
         print("   + [[Category:%s]]  ->  %s" % (cat, t))
     if next_command:
@@ -2177,7 +2364,20 @@ def remaining_unselected_count(review):
         return None
     return len([item for item in items if item["target"] and not item["checked"]])
 
-def print_commit_done_summary(added, skipped, failed, review, approved):
+def clear_review_selections(review):
+    try:
+        items = parse_review_items(review)
+    except OSError:
+        return False
+    if not any(item["target"] and item["checked"] for item in items):
+        return False
+    set_review_approvals(review, items, set())
+    return True
+
+def guided_selection_clear_message():
+    return "Those photos are no longer selected, so you won't add them twice."
+
+def print_commit_done_summary(added, skipped, failed, review, approved, guided=False):
     print("")
     print("Done.")
     print("  Added category to %d photo(s)." % added)
@@ -2199,15 +2399,22 @@ def print_commit_done_summary(added, skipped, failed, review, approved):
     remaining = remaining_unselected_count(review)
     if failed:
         print("")
-        print("Some photos failed. Check the messages above, then run credit-check plan %s before trying again." %
-              review_path_arg(review))
+        if guided:
+            print("Some photos failed. Check the messages above, then choose Add selected photos to your category page on Wikimedia Commons again when you're ready.")
+        else:
+            print("Some photos failed. Check the messages above, then run credit-check plan %s before trying again." %
+                  review_path_arg(review))
     elif remaining:
         print("")
-        print("%d unchecked photo(s) remain in %s. Run credit-check review %s when you want to keep going." %
-              (remaining, review, review_path_arg(review)))
+        if guided:
+            print("%d photos you did not select remain. Choose \"Choose photos to add\" when you want to keep going." %
+                  remaining)
+        else:
+            print("%d photos you did not select remain. Run credit-check review %s when you want to keep going." %
+                  (remaining, review_path_arg(review)))
     else:
         print("")
-        print("All selected photos are handled.")
+        print("All your selected photos are now categorized.")
 
 def cmd_plan(args):
     approved = approved_or_exit(args.review)
@@ -2221,7 +2428,10 @@ def cmd_commit(args):
                    "credit-check commit %s --go" % review_path_arg(args.review))
         return
 
-    print("%d photo(s) selected in %s." % (len(approved), args.review))
+    if getattr(args, "guided", False):
+        print("%d photo(s) selected." % len(approved))
+    else:
+        print("%d photo(s) selected in %s." % (len(approved), args.review))
 
     botuser = args.botuser or os.environ.get("COMMONS_BOTUSER") \
         or input("Bot username (e.g. Jaydixit@categorize): ").strip()
@@ -2230,7 +2440,7 @@ def cmd_commit(args):
 
     cl = Client()
     csrf = login(cl, botuser, botpass)
-    print("Logged in. Editing with %ss throttle...\n" % args.throttle)
+    print("Logged in. Adding categories, pausing a few seconds between edits...\n")
 
     added = skipped = failed = 0
     for t, cat in approved:
@@ -2254,7 +2464,10 @@ def cmd_commit(args):
         else:
             print("  ! failed: %s -> %s" % (t, res)); failed += 1
         time.sleep(args.throttle)
-    print_commit_done_summary(added, skipped, failed, args.review, approved)
+    print_commit_done_summary(added, skipped, failed, args.review, approved,
+                              guided=getattr(args, "guided", False))
+    if getattr(args, "guided", False) and not failed and clear_review_selections(args.review):
+        print(guided_selection_clear_message())
 
 
 # ---------------------------------------------------------------- self-checks
@@ -2326,6 +2539,45 @@ def check_retry_policy():
     finally:
         time.sleep = old_sleep
 
+def check_atomic_write_text():
+    with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+        path = os.path.join(td, "sample.txt")
+        atomic_write_text(path, "hello\n")
+        check_equal("atomic write content", open(path, encoding="utf-8").read(), "hello\n")
+        leftovers = [name for name in os.listdir(td)
+                     if name.startswith(".credit-check-write.")]
+        check_equal("atomic write temp leftovers", leftovers, [])
+
+        old_replace = os.replace
+        atomic_write_text(path, "old\n")
+        try:
+            def failing_replace(src, dst):
+                raise KeyboardInterrupt()
+
+            os.replace = failing_replace
+            try:
+                atomic_write_text(path, "new\n")
+                raise AssertionError("atomic write failure did not re-raise")
+            except KeyboardInterrupt:
+                pass
+        finally:
+            os.replace = old_replace
+        check_equal("atomic write preserved target",
+                    open(path, encoding="utf-8").read(), "old\n")
+        leftovers = [name for name in os.listdir(td)
+                     if name.startswith(".credit-check-write.")]
+        check_equal("atomic write failure temp cleanup", leftovers, [])
+
+        by_list, of_list, amb_list, meta = sample_review_data()
+        review = os.path.join(td, "review.md")
+        write_review(by_list, of_list, amb_list, meta, review, "markdown")
+        items = parse_review_items(review)
+        approvable = [item for item in items if item["target"]]
+        set_review_approvals(review, items, {approvable[0]["line"]})
+        check_equal("atomic review round trip",
+                    parse_approved(review, warn=False),
+                    [("File:Example.jpg", "Photographs by Test Person")])
+
 def write_and_parse_sample(review_format, suffix):
     by_list, of_list, amb_list, meta = sample_review_data()
     with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
@@ -2388,9 +2640,15 @@ def check_guided_review_state():
             state = review_workflow_state()
             check_equal("guided setup complete", state["setup_complete"], True)
             check_equal("guided no-review after setup", review_state_label(state),
-                        "No review yet")
+                        "Ready to find your photos")
 
             by_list, of_list, amb_list, meta = sample_review_data()
+            write_review({}, {}, {}, meta, "review.md", "markdown")
+            state = review_workflow_state()
+            check_equal("guided empty review total", state["total"], 0)
+            check_equal("guided empty review label", review_state_label(state),
+                        "You're all caught up — re-scan to check for new photos")
+
             write_review(by_list, of_list, amb_list, meta, "review.md", "markdown")
             state = review_workflow_state()
             check_equal("guided review exists", state["exists"], True)
@@ -2408,16 +2666,19 @@ def check_guided_review_state():
         for key, value in old_env.items():
             if value is not None:
                 os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
 
 def check_guided_menu_dispatch():
     for value in ("self_test", "smoke", "scan_by", "scan_of", "review",
-                  "review_selected", "plan", "settings", "add", "quit"):
+                  "settings", "add", "quit"):
         check_equal("guided dispatch %s" % value,
                     interactive_choice_action(value), value)
     for value in ("q", "quit", "exit"):
         check_equal("guided quit shortcut %s" % value,
                     interactive_choice_action(value), "quit")
-    for value in ("1", "2", "3", "3b", "4", "5", "6", "9", "of"):
+    for value in ("1", "2", "3", "3b", "4", "5", "6", "9", "of",
+                  "plan", "review_selected"):
         check_equal("legacy guided input ignored %s" % value,
                     interactive_choice_action(value), None)
 
@@ -2429,18 +2690,42 @@ def check_guided_menu_visibility():
     try:
         with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
             os.chdir(td)
-            save_local_preferences({"username": "TestUser", "author": "Test Person"})
             state = review_workflow_state()
             values = [value for _label, value, _desc in interactive_menu_actions(state)]
+            if "scan_of" not in values:
+                raise AssertionError("photos-of-you action did not show before setup")
+
+            save_local_preferences({"username": "TestUser", "author": "Test Person"})
+            state = review_workflow_state()
+            actions = interactive_menu_actions(state)
+            values = [value for _label, value, _desc in actions]
             if "self_test" in values or "smoke" in values:
                 raise AssertionError("developer checks leaked into the default menu")
-            if "scan_of" in values:
-                raise AssertionError("photos-of-you action showed without a QID")
-
-            save_local_preferences({"qid": "Q12345"})
-            values = [value for _label, value, _desc in interactive_menu_actions(state)]
             if "scan_of" not in values:
-                raise AssertionError("photos-of-you action did not show with a QID")
+                raise AssertionError("photos-of-you action did not show without a QID")
+            labels = {value: label for label, value, _desc in actions}
+            check_equal("photos-of-you guided label", labels.get("scan_of"),
+                        "Find photos *of* you")
+
+            zero = {"setup_complete": True, "exists": True, "total": 0,
+                    "selected": 0, "ambiguous": 0, "review": "review.md"}
+            zero_values = [value for _label, value, _desc in interactive_menu_actions(zero)]
+            if zero_values[0] != "scan_by":
+                raise AssertionError("empty review should lead with a scan, not review")
+            if "review" in zero_values:
+                raise AssertionError("empty review must not offer photo review")
+
+            selected = {"setup_complete": True, "exists": True, "total": 2,
+                        "selected": 1, "ambiguous": 0, "review": "review.md"}
+            selected_actions = interactive_menu_actions(selected)
+            selected_labels = [label for label, _value, _desc in selected_actions]
+            selected_values = [value for _label, value, _desc in selected_actions]
+            check_equal("selected menu primary label", selected_labels[0],
+                        "Add selected photos to your category page on Wikimedia Commons")
+            if "plan" in selected_values:
+                raise AssertionError("selected menu must not offer terminal preview")
+            if "review_selected" in selected_values:
+                raise AssertionError("selected menu must not offer selected-only review")
 
             os.environ["CREDIT_CHECK_DEV"] = "1"
             values = [value for _label, value, _desc in interactive_menu_actions(state)]
@@ -2451,8 +2736,153 @@ def check_guided_menu_visibility():
         for key, value in old_env.items():
             if value is not None:
                 os.environ[key] = value
+
+def check_guided_menu_copy_matrix():
+    old_env = {key: os.environ.pop(key, None) for key in (
+        "CREDIT_CHECK_DEV", "CREDIT_CHECK_DEV_MENU")}
+    try:
+        photos_of_you = (
+            "Find photos *of* you",
+            "scan_of",
+            "Find portraits of you taken by other people and add them to your category for photos of you.",
+        )
+        quit_action = ("Quit", "quit", "")
+        settings = (
+            "Settings",
+            "settings",
+            "Save your name, Commons account, and category for photos you took.",
+        )
+        setup = (
+            "Set up Credit Check",
+            "settings",
+            "Save your Commons account, credited name, and category.",
+        )
+        find = (
+            "Find your photos on Wikipedia",
+            "scan_by",
+            "Find photos credited to you that are used on Wikipedia and missing your category.",
+        )
+        scan_again = (
+            "Scan again for new photos",
+            "scan_by",
+            "Search again for new photos you've uploaded or that are newly used on Wikipedia. Replaces the current found photos.",
+        )
+        caught_up_scan = (
+            "Scan again for new photos",
+            "scan_by",
+            "Check whether new Wikipedia-used photos now need your category.",
+        )
+        choose = (
+            "Choose photos to add",
+            "review",
+            "Open the browser photo picker and choose photos.",
+        )
+        add = (
+            "Add selected photos to your category page on Wikimedia Commons",
+            "add",
+            "Show the exact Commons edits, then confirm before changing anything.",
+        )
+        cases = [
+            ("setup needed",
+             {"setup_complete": False, "exists": False, "total": 0,
+              "selected": 0, "ambiguous": 0, "review": "review.md"},
+             [setup, find, photos_of_you, quit_action]),
+            ("ready to scan",
+             {"setup_complete": True, "exists": False, "total": 0,
+              "selected": 0, "ambiguous": 0, "review": "review.md"},
+             [find, settings, photos_of_you, quit_action]),
+            ("caught up",
+             {"setup_complete": True, "exists": True, "total": 0,
+              "selected": 0, "ambiguous": 0, "review": "review.md"},
+             [caught_up_scan, settings, photos_of_you, quit_action]),
+            ("choose photos",
+             {"setup_complete": True, "exists": True, "total": 2,
+              "selected": 0, "ambiguous": 1, "review": "review.md"},
+             [choose, scan_again, settings, photos_of_you, quit_action]),
+            ("selected photos",
+             {"setup_complete": True, "exists": True, "total": 2,
+              "selected": 1, "ambiguous": 0, "review": "review.md"},
+             [add, scan_again, choose, settings, photos_of_you, quit_action]),
+            ("setup incomplete with photos",
+             {"setup_complete": False, "exists": True, "total": 2,
+              "selected": 0, "ambiguous": 0, "review": "review.md"},
+             [setup, scan_again, choose, photos_of_you, quit_action]),
+        ]
+        for name, state, expected in cases:
+            check_equal("guided menu copy matrix %s" % name,
+                        interactive_menu_actions(state), expected)
+    finally:
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
             else:
                 os.environ.pop(key, None)
+
+def check_guided_copy_messages():
+    check_equal("guided missing-results message",
+                missing_review_message(guided=True),
+                "No photos found yet. Choose Find your photos on Wikipedia first.")
+    check_equal("guided empty-results message",
+                empty_review_message(guided=True),
+                "You're all caught up. Choose Scan again for new photos when you want to check again.")
+    check_equal("guided ambiguous-results message",
+                no_approvable_review_message(1, guided=True),
+                "Credit Check found photos, but couldn't tell which category to use for them, so there are no photos to choose yet.")
+    check_equal("guided no-double-add message",
+                guided_selection_clear_message(),
+                "Those photos are no longer selected, so you won't add them twice.")
+
+    old_stdout = sys.stdout
+    old_prompt_yes_no = globals()["prompt_yes_no"]
+    old_cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            by_list, of_list, amb_list, meta = sample_review_data()
+
+            sys.stdout = io.StringIO()
+            review_file_web("missing.md", open_browser=False, guided=True)
+            check_equal("guided web missing output", sys.stdout.getvalue().strip(),
+                        missing_review_message(guided=True))
+
+            write_review({}, {}, {}, meta, "review.md", "markdown")
+            sys.stdout = io.StringIO()
+            review_file_interactive("review.md", guided=True)
+            check_equal("guided terminal empty output",
+                        sys.stdout.getvalue().strip(),
+                        empty_review_message(guided=True))
+
+            write_review({}, {}, amb_list, meta, "review.md", "markdown")
+            sys.stdout = io.StringIO()
+            review_file_web("review.md", open_browser=False, guided=True)
+            check_equal("guided web ambiguous output",
+                        sys.stdout.getvalue().strip(),
+                        no_approvable_review_message(1, guided=True))
+
+            write_review(by_list, of_list, amb_list, meta, "review.md", "markdown")
+            items = parse_review_items("review.md")
+            approvable = [item for item in items if item["target"]]
+            set_review_approvals("review.md", items, {approvable[0]["line"]})
+            prompts = []
+
+            def no_confirm(label, default=False):
+                prompts.append((label, default))
+                return False
+
+            globals()["prompt_yes_no"] = no_confirm
+            sys.stdout = io.StringIO()
+            interactive_preview_and_commit()
+            output = sys.stdout.getvalue()
+            if "This will add categories on Wikimedia Commons." not in output:
+                raise AssertionError("guided add confirmation intro missing")
+            if "selected in review.md" in output:
+                raise AssertionError("guided add preview leaked the review filename")
+            check_equal("guided add confirmation prompt", prompts,
+                        [("Add these categories now?", False)])
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_yes_no"] = old_prompt_yes_no
+        os.chdir(old_cwd)
 
 def check_review_preferences():
     old_cwd = os.getcwd()
@@ -2518,6 +2948,351 @@ def check_review_preferences():
         if old_env is not None:
             os.environ[REVIEW_FORMAT_ENV] = old_env
 
+def check_interactive_settings_core_only():
+    old_cwd = os.getcwd()
+    old_env = {key: os.environ.pop(key, None) for key in (
+        "WIKI_USERNAME", "WIKI_AUTHOR", "WIKI_BY_CATEGORY", "WIKI_OF_CATEGORY",
+        "WIKI_QID")}
+    old_prompt = globals()["prompt_text"]
+    old_stdout = sys.stdout
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            save_local_preferences({
+                "username": "OldUser",
+                "author": "Old Author",
+                "by_category": "Old Category",
+                "of_category": "Existing Subject",
+                "qid": "Q999",
+            })
+            prompts = []
+            answers = {
+                "Commons username": "NewUser",
+                "Your name as it's credited on Commons": "New Author",
+                "Commons category for photos you took": "Photographs by New Author",
+            }
+
+            def fake_prompt(label, default=None, required=False):
+                prompts.append((label, default, required))
+                return answers[label]
+
+            globals()["prompt_text"] = fake_prompt
+            sys.stdout = io.StringIO()
+            interactive_settings()
+            prefs = local_preferences()
+            check_equal("settings prompts", [p[0] for p in prompts], [
+                "Commons username",
+                "Your name as it's credited on Commons",
+                "Commons category for photos you took",
+            ])
+            check_equal("settings saved username", prefs.get("username"), "NewUser")
+            check_equal("settings saved author", prefs.get("author"), "New Author")
+            check_equal("settings saved by category", prefs.get("by_category"),
+                        "Photographs by New Author")
+            check_equal("settings preserved of-category",
+                        prefs.get("of_category"), "Existing Subject")
+            check_equal("settings preserved qid", prefs.get("qid"), "Q999")
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_text"] = old_prompt
+        os.chdir(old_cwd)
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
+def check_interactive_by_scan_identity_prompts():
+    old_cwd = os.getcwd()
+    old_env = {key: os.environ.pop(key, None) for key in (
+        "WIKI_USERNAME", "WIKI_AUTHOR", "WIKI_BY_CATEGORY", "WIKI_OF_CATEGORY",
+        "WIKI_QID", REVIEW_FORMAT_ENV)}
+    old_prompt = globals()["prompt_text"]
+    old_cmd_scan = globals()["cmd_scan"]
+    old_open_review = globals()["open_review_from_guided_flow"]
+    old_stdout = sys.stdout
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            save_local_preferences({
+                "username": "SavedUser",
+                "author": "Saved Author",
+                "by_category": "Saved By Category",
+            })
+            scan_calls = []
+            prompts = []
+
+            def fake_cmd_scan(args):
+                scan_calls.append(args)
+
+            def fake_prompt(label, default=None, required=False):
+                prompts.append((label, default, required))
+                raise AssertionError("unexpected prompt: %s" % label)
+
+            globals()["cmd_scan"] = fake_cmd_scan
+            globals()["open_review_from_guided_flow"] = lambda out: None
+            globals()["prompt_text"] = fake_prompt
+            sys.stdout = io.StringIO()
+            interactive_scan("by")
+            check_equal("saved by-scan prompt count", prompts, [])
+            check_equal("saved by-scan calls", len(scan_calls), 1)
+            args = scan_calls[0]
+            check_equal("saved by-scan username", args.username, "SavedUser")
+            check_equal("saved by-scan author", args.author, "Saved Author")
+            check_equal("saved by-scan category", args.by_category, "Saved By Category")
+
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            scan_calls = []
+            prompts = []
+            answers = {
+                "Commons username": "PromptedUser",
+                "Your name as it's credited on Commons": "Prompted Author",
+            }
+
+            def fake_prompt_missing(label, default=None, required=False):
+                prompts.append((label, default, required))
+                return answers[label]
+
+            globals()["cmd_scan"] = lambda args: scan_calls.append(args)
+            globals()["prompt_text"] = fake_prompt_missing
+            sys.stdout = io.StringIO()
+            interactive_scan("by")
+            check_equal("missing identity prompts", [p[0] for p in prompts], [
+                "Commons username",
+                "Your name as it's credited on Commons",
+            ])
+            check_equal("missing by-scan calls", len(scan_calls), 1)
+            args = scan_calls[0]
+            check_equal("missing by-scan username", args.username, "PromptedUser")
+            check_equal("missing by-scan author", args.author, "Prompted Author")
+            check_equal("missing by-scan default category",
+                        args.by_category, "Photographs by Prompted Author")
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_text"] = old_prompt
+        globals()["cmd_scan"] = old_cmd_scan
+        globals()["open_review_from_guided_flow"] = old_open_review
+        os.chdir(old_cwd)
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
+def check_wikidata_candidate_parser():
+    sample = {
+        "search": [
+            {"id": "Q12345", "label": "Jay Dixit",
+             "description": "writer and editor"},
+            {"id": "Q67890", "label": "Jay Dixit",
+             "description": "cricketer"},
+            {"label": "No id", "description": "ignored"},
+        ],
+    }
+    check_equal("wikidata candidate parser", parse_wikidata_candidates(sample), [
+        {"id": "Q12345", "label": "Jay Dixit", "description": "writer and editor"},
+        {"id": "Q67890", "label": "Jay Dixit", "description": "cricketer"},
+    ])
+    check_equal("empty wikidata candidates",
+                parse_wikidata_candidates({"search": []}), [])
+    check_equal("wikidata candidate label",
+                wikidata_candidate_label(parse_wikidata_candidates(sample)[0]),
+                "Jay Dixit — writer and editor (Q12345)")
+    check_equal("wikidata url qid normalization",
+                normalize_qid_input("https://www.wikidata.org/wiki/q12345"), "Q12345")
+
+def check_interactive_wikidata_lookup_paths():
+    old_prompt = globals()["prompt_text"]
+    old_stdout = sys.stdout
+    old_cwd = os.getcwd()
+    old_env = os.environ.pop("WIKI_QID", None)
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            candidate_prompts = []
+
+            def prompt_candidate(label, default=None, required=False):
+                candidate_prompts.append((label, default, required))
+                return "2"
+
+            globals()["prompt_text"] = prompt_candidate
+            sys.stdout = io.StringIO()
+            qid = interactive_wikidata_qid("Jay Dixit", fetcher=lambda name: [
+                {"id": "Q12345", "label": "Jay Dixit", "description": "writer"},
+                {"id": "Q67890", "label": "Jay Dixit", "description": "cricketer"},
+            ])
+            check_equal("candidate selected qid", qid, "Q67890")
+            check_equal("candidate selection prompt", [p[0] for p in candidate_prompts],
+                        ["Choose"])
+
+            manual_prompts = []
+            manual_answers = iter(["2", "https://www.wikidata.org/wiki/Q12345"])
+
+            def prompt_manual(label, default=None, required=False):
+                manual_prompts.append((label, default, required))
+                return next(manual_answers)
+
+            globals()["prompt_text"] = prompt_manual
+            sys.stdout = io.StringIO()
+            qid = interactive_wikidata_qid("Jay Dixit", fetcher=lambda name: [
+                {"id": "Q67890", "label": "Jay Dixit", "description": "cricketer"},
+            ])
+            check_equal("manual fallback qid", qid, "Q12345")
+            check_equal("manual fallback prompts", [p[0] for p in manual_prompts], [
+                "Choose",
+                "Your Q-number is in your wikidata.org page URL, like Q12345.",
+            ])
+
+            no_result_prompts = []
+            no_result_answers = iter(["1", "q99999"])
+
+            def prompt_no_result(label, default=None, required=False):
+                no_result_prompts.append((label, default, required))
+                return next(no_result_answers)
+
+            globals()["prompt_text"] = prompt_no_result
+            sys.stdout = io.StringIO()
+            qid = interactive_wikidata_qid("Missing Person", fetcher=lambda name: [])
+            no_result_output = sys.stdout.getvalue()
+            check_equal("no-result manual qid", qid, "Q99999")
+            if "No Wikidata item found for 'Missing Person'" not in no_result_output:
+                raise AssertionError("missing no-result Wikidata message")
+            check_equal("no-result manual prompts", [p[0] for p in no_result_prompts], [
+                "Choose",
+                "Your Q-number is in your wikidata.org page URL, like Q12345.",
+            ])
+
+            error_prompts = []
+
+            def prompt_error(label, default=None, required=False):
+                error_prompts.append((label, default, required))
+                return "2"
+
+            def failing_fetcher(name):
+                raise urllib.error.URLError("simulated outage")
+
+            globals()["prompt_text"] = prompt_error
+            sys.stdout = io.StringIO()
+            qid = interactive_wikidata_qid("Offline Person", fetcher=failing_fetcher)
+            error_output = sys.stdout.getvalue()
+            check_equal("error skip qid", qid, None)
+            if "Couldn't reach Wikidata" not in error_output:
+                raise AssertionError("missing Wikidata error message")
+            check_equal("error skip prompts", [p[0] for p in error_prompts], ["Choose"])
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_text"] = old_prompt
+        os.chdir(old_cwd)
+        if old_env is not None:
+            os.environ["WIKI_QID"] = old_env
+
+def check_interactive_of_scan_onboarding():
+    old_cwd = os.getcwd()
+    old_env = {key: os.environ.pop(key, None) for key in (
+        "WIKI_USERNAME", "WIKI_AUTHOR", "WIKI_BY_CATEGORY", "WIKI_OF_CATEGORY",
+        "WIKI_QID", REVIEW_FORMAT_ENV)}
+    old_prompt = globals()["prompt_text"]
+    old_cmd_scan = globals()["cmd_scan"]
+    old_open_review = globals()["open_review_from_guided_flow"]
+    old_fetch = globals()["fetch_wikidata_candidates"]
+    old_stdout = sys.stdout
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            save_local_preferences({
+                "username": "SavedUser",
+                "author": "Saved Author",
+                "by_category": "Saved By Category",
+            })
+            scan_calls = []
+            opened = []
+
+            def fake_cmd_scan(args):
+                scan_calls.append(args)
+
+            globals()["cmd_scan"] = fake_cmd_scan
+            globals()["open_review_from_guided_flow"] = lambda out: opened.append(out)
+            globals()["fetch_wikidata_candidates"] = lambda name: []
+
+            no_qid_prompts = []
+            no_qid_answers = {
+                "Commons category for photos of you": "Saved Author",
+                "Choose": "2",
+            }
+
+            def fake_prompt_no_qid(label, default=None, required=False):
+                no_qid_prompts.append((label, default, required))
+                return no_qid_answers[label]
+
+            globals()["prompt_text"] = fake_prompt_no_qid
+            sys.stdout = io.StringIO()
+            interactive_scan("of")
+            no_qid_output = sys.stdout.getvalue()
+            check_equal("of scan skipped without qid", len(scan_calls), 0)
+            if "Without a Wikidata ID" not in no_qid_output:
+                raise AssertionError("missing graceful no-QID message")
+            prefs = local_preferences()
+            if "qid" in prefs or "of_category" in prefs:
+                raise AssertionError("blank of-scan saved portrait settings")
+            check_equal("of scan prompts without qid", [p[0] for p in no_qid_prompts], [
+                "Commons category for photos of you",
+                "Choose",
+            ])
+            check_equal("of-category default without qid", no_qid_prompts[0][1],
+                        "Saved Author")
+            if "No Wikidata item found for 'Saved Author'" not in no_qid_output:
+                raise AssertionError("missing no-results message in of-scan")
+
+            with_qid_prompts = []
+            with_qid_answers = {
+                "Commons category for photos of you": "Portrait Category",
+                "Choose": "1",
+            }
+
+            def fake_prompt_with_qid(label, default=None, required=False):
+                with_qid_prompts.append((label, default, required))
+                return with_qid_answers[label]
+
+            globals()["prompt_text"] = fake_prompt_with_qid
+            globals()["fetch_wikidata_candidates"] = lambda name: [
+                {"id": "Q12345", "label": "Saved Author", "description": "writer"},
+            ]
+            sys.stdout = io.StringIO()
+            interactive_scan("of")
+            check_equal("of scan proceeded with qid", len(scan_calls), 1)
+            args = scan_calls[0]
+            check_equal("of scan mode", args.scan_mode, "of")
+            check_equal("of scan username", args.username, "SavedUser")
+            check_equal("of scan author", args.author, "Saved Author")
+            check_equal("of scan by category", args.by_category, "Saved By Category")
+            check_equal("of scan category", args.of_category, "Portrait Category")
+            check_equal("of scan qid", args.qid, "Q12345")
+            prefs = local_preferences()
+            check_equal("of scan preserved username", prefs.get("username"), "SavedUser")
+            check_equal("of scan preserved author", prefs.get("author"), "Saved Author")
+            check_equal("of scan preserved by category",
+                        prefs.get("by_category"), "Saved By Category")
+            check_equal("of scan saved of category",
+                        prefs.get("of_category"), "Portrait Category")
+            check_equal("of scan saved qid", prefs.get("qid"), "Q12345")
+            check_equal("of scan prompts with qid", [p[0] for p in with_qid_prompts], [
+                "Commons category for photos of you",
+                "Choose",
+            ])
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_text"] = old_prompt
+        globals()["cmd_scan"] = old_cmd_scan
+        globals()["open_review_from_guided_flow"] = old_open_review
+        globals()["fetch_wikidata_candidates"] = old_fetch
+        os.chdir(old_cwd)
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
 def check_of_only_review_sections():
     by_list, of_list, amb_list, meta = sample_of_review_data()
     with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
@@ -2529,7 +3304,7 @@ def check_of_only_review_sections():
         if "# Ambiguous" in text:
             raise AssertionError("of-only review included the ambiguous section")
         if "# Add to [Category:Test Person]" not in text:
-            raise AssertionError("of-only review omitted the subject category section")
+            raise AssertionError("of-only review omitted the photos-of-you category section")
 
 def check_review_gallery_html():
     item = {
@@ -2565,22 +3340,42 @@ def check_web_review_html():
             "window.CREDIT_CHECK_REVIEW_ARG",
             "window.CREDIT_CHECK_AMBIGUOUS_COUNT = 2",
             "window.CREDIT_CHECK_INITIAL_MODE",
-            "ambiguous ${noun} not shown here",
+            "window.CREDIT_CHECK_GUIDED",
+            "ambiguous ${noun} skipped because",
             "Photos credited to you, missing this category",
             "Special:FilePath/Example_photo.jpg?width=420",
-            "Select visible",
+            "Select shown",
             "data-mode=\"selected\"",
-            "Preview edits",
+            "Commons edits",
+            "Select photos to see the category edits here.",
             "credit-check commit ${reviewArg} --go",
-            "Shortcuts: / search, Space select, o open, s save",
-            "Save and close",
-            'fetch("/save"'):
+            "Shortcuts: / search, Space select, o open",
+            'data-action="done"',
+            "Done",
+            "scheduleSave",
+            "selectionRevision",
+            "Saving...",
+            "Saved",
+            "navigator.sendBeacon",
+            "beforeunload",
+            'fetch("/save"',
+            "window.close()",
+            "You can now close this tab"):
         if needle not in text:
             raise AssertionError("web review missing %r" % needle)
+    if 'data-action="preview"' in text or 'data-action="hide-preview"' in text:
+        raise AssertionError("web review should show Commons edits live without preview buttons")
+    if 'data-action="save"' in text or 'data-action="save-close"' in text:
+        raise AssertionError("web review should rely on auto-save plus one Done button")
+    if "After saving" in text or "Then run:" in text or "review-path" in text:
+        raise AssertionError("web review should not surface old save/path hints")
 
     selected_text = web_review_html("review.md", [item], initial_mode="selected")
     if 'window.CREDIT_CHECK_INITIAL_MODE = "selected"' not in selected_text:
         raise AssertionError("web review selected-only mode was not embedded")
+    guided_text = web_review_html("review.md", [item], guided=True)
+    if "You're all set - close this and choose Add selected photos to your category page on Wikimedia Commons from the menu." not in guided_text:
+        raise AssertionError("guided web review next step was not embedded")
 
 def check_commit_summary_helpers():
     check_equal("category url",
@@ -2595,6 +3390,11 @@ def check_commit_summary_helpers():
         approvable = [item for item in items if item["target"]]
         set_review_approvals(path, items, {approvable[0]["line"]})
         check_equal("remaining after selection", remaining_unselected_count(path), 0)
+        check_equal("clear selected review checkboxes", clear_review_selections(path), True)
+        check_equal("selected cleared after guided add",
+                    parse_approved(path, warn=False), [])
+        check_equal("clearing unselected review is a no-op",
+                    clear_review_selections(path), False)
 
 def check_web_review_save():
     by_list, of_list, amb_list, meta = sample_review_data()
@@ -2611,13 +3411,69 @@ def check_web_review_save():
             WEB_REVIEW_HOST, server.server_address[1])
         server.review_host = "%s:%d" % (WEB_REVIEW_HOST, server.server_address[1])
         server.review_signature = review_items_signature(items)
+        server.review_lock = threading.Lock()
+        server.review_client_revision = -1
         server.saved_count = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             body = json.dumps({
                 "selected_lines": [approvable[0]["line"]],
+                "close": False,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                server.review_origin + "/save",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            check_equal("web save without origin response", data["ok"], True)
+            check_equal("web save without origin selections",
+                        parse_approved(path, warn=False),
+                        [("File:Example.jpg", "Photographs by Test Person")])
+
+            body = json.dumps({
+                "selected_lines": [approvable[0]["line"]],
+                "close": False,
+                "revision": 2,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                server.review_origin + "/save",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": server.review_origin,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            check_equal("web save revision response", data["ok"], True)
+
+            body = json.dumps({
+                "selected_lines": [],
+                "close": False,
+                "revision": 1,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                server.review_origin + "/save",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": server.review_origin,
+                },
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            check_equal("stale browser revision ignored", data.get("stale"), True)
+            check_equal("stale browser revision kept selections",
+                        parse_approved(path, warn=False),
+                        [("File:Example.jpg", "Photographs by Test Person")])
+
+            body = json.dumps({
+                "selected_lines": [approvable[0]["line"]],
                 "close": True,
+                "revision": 3,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -2657,6 +3513,8 @@ def check_web_review_stale_save():
             WEB_REVIEW_HOST, server.server_address[1])
         server.review_host = "%s:%d" % (WEB_REVIEW_HOST, server.server_address[1])
         server.review_signature = review_items_signature(items)
+        server.review_lock = threading.Lock()
+        server.review_client_revision = -1
         server.saved_count = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -2713,6 +3571,58 @@ def check_scan_routing():
                 route_record(rec_amb, "TestUser", "Test Person", "Test Person", {123}),
                 "ambiguous")
 
+def check_zero_candidate_scan_no_review():
+    old_cwd = os.getcwd()
+    old_discover = globals()["discover_titles"]
+    old_fetch_details = globals()["fetch_details"]
+    old_write_review = globals()["write_review"]
+    old_stderr = sys.stderr
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            save_local_preferences({"username": "WrongUser", "author": "Wrong Author"})
+
+            def no_titles(cl, username, author, insource_user):
+                return {}
+
+            def should_not_fetch(*args, **kwargs):
+                raise AssertionError("zero-candidate scan fetched details")
+
+            def should_not_write(*args, **kwargs):
+                raise AssertionError("zero-candidate scan wrote a review")
+
+            globals()["discover_titles"] = no_titles
+            globals()["fetch_details"] = should_not_fetch
+            globals()["write_review"] = should_not_write
+            sys.stderr = io.StringIO()
+            args = argparse.Namespace(
+                username="WrongUser", author="Wrong Author", by_category=None,
+                of_category=None, qid=None, insource_user=False, no_derivatives=True,
+                depth=0, english_only=False, min_uses=1, review_format="markdown",
+                out="review.md", scan_mode="by")
+            cmd_scan(args)
+            output = sys.stderr.getvalue()
+            if "found no files for user WrongUser" not in output:
+                raise AssertionError("missing zero-candidate scan warning")
+            if os.path.exists("review.md"):
+                raise AssertionError("zero-candidate scan created a review file")
+            check_equal("zero-candidate no-review label",
+                        review_state_label(review_workflow_state()),
+                        "Ready to find your photos")
+
+            atomic_write_text("review.md", "existing review\n")
+            sys.stderr = io.StringIO()
+            cmd_scan(args)
+            check_equal("zero-candidate existing review preserved",
+                        open("review.md", encoding="utf-8").read(),
+                        "existing review\n")
+    finally:
+        sys.stderr = old_stderr
+        globals()["discover_titles"] = old_discover
+        globals()["fetch_details"] = old_fetch_details
+        globals()["write_review"] = old_write_review
+        os.chdir(old_cwd)
+
 def run_check(name, func, failures):
     try:
         func()
@@ -2767,6 +3677,7 @@ def cmd_self_test(args):
     run_check("review format preferences", formats, failures)
     run_check("local review-format preference file", check_review_preferences, failures)
     run_check("HTTP POST retry policy", check_retry_policy, failures)
+    run_check("atomic text writes", check_atomic_write_text, failures)
     run_check("authorship classification", authorship, failures)
     run_check("Markdown review write/parse", lambda: write_and_parse_sample("markdown", ".md"), failures)
     run_check("org review write/parse", lambda: write_and_parse_sample("org", ".org"), failures)
@@ -2782,7 +3693,15 @@ def cmd_self_test(args):
     run_check("guided review state", check_guided_review_state, failures)
     run_check("guided menu dispatch", check_guided_menu_dispatch, failures)
     run_check("guided menu visibility", check_guided_menu_visibility, failures)
+    run_check("guided menu copy matrix", check_guided_menu_copy_matrix, failures)
+    run_check("guided copy messages", check_guided_copy_messages, failures)
+    run_check("interactive settings core fields", check_interactive_settings_core_only, failures)
+    run_check("interactive by-scan identity prompts", check_interactive_by_scan_identity_prompts, failures)
+    run_check("Wikidata candidate parsing", check_wikidata_candidate_parser, failures)
+    run_check("interactive Wikidata lookup paths", check_interactive_wikidata_lookup_paths, failures)
+    run_check("interactive photos-of-you onboarding", check_interactive_of_scan_onboarding, failures)
     run_check("scan routing classification", check_scan_routing, failures)
+    run_check("zero-candidate scan guard", check_zero_candidate_scan_no_review, failures)
 
     if failures:
         sys.exit("%d self-test(s) failed." % len(failures))
@@ -2809,14 +3728,15 @@ def cmd_smoke(args):
         out=out, scan_mode="by")
     cmd_scan(scan_args)
     if not os.path.exists(out):
-        sys.exit("Smoke test failed: expected review file was not written: %s" % out)
-    if parse_approved(out):
-        sys.exit("Smoke test failed: empty review unexpectedly had selected photos.")
-    print("Smoke test passed: wrote %s" % out)
+        print("Smoke test passed: no candidate files found, so no review was written.")
+    else:
+        if parse_approved(out):
+            sys.exit("Smoke test failed: empty review unexpectedly had selected photos.")
+        print("Smoke test passed: wrote %s" % out)
 
     if not args.keep and not args.out:
         temp_ctx.cleanup()
-        print("Temporary smoke review removed. Use --keep or --out to inspect it.")
+        print("Temporary smoke files removed. Use --keep or --out to inspect them.")
 
 
 # ---------------------------------------------------------------- interactive app
@@ -2828,9 +3748,6 @@ def interactive_dev_mode():
     return preference_bool("dev_menu", default=False) or preference_bool(
         "dev", default=False) or os.environ.get("CREDIT_CHECK_DEV") in (
             "1", "true", "TRUE", "yes", "YES", "on", "ON")
-
-def has_subject_scan_settings():
-    return bool(identity_default("qid", "WIKI_QID"))
 
 def fancy_prompts_available():
     return (questionary is not None
@@ -2888,6 +3805,83 @@ def prompt_int(label, default):
         except ValueError:
             print("Please enter a number.")
 
+def prompt_select(label, choices, default_index=0):
+    if fancy_prompts_available():
+        return ask_question(questionary.select(
+            label,
+            qmark=PROMPT_MARKER,
+            choices=[
+                questionary.Choice(text, value=value, description=desc)
+                for text, value, desc in choices
+            ],
+        ))
+
+    while True:
+        print(label)
+        for idx, (text, _value, _desc) in enumerate(choices, start=1):
+            print("  %d. %s" % (idx, text))
+        default = str(default_index + 1) if 0 <= default_index < len(choices) else "1"
+        answer = prompt_text("Choose", default)
+        if answer and answer.isdigit():
+            idx = int(answer)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1][1]
+        for text, value, _desc in choices:
+            if answer == value or (answer and answer.lower() == text.lower()):
+                return value
+        print("Choose one of the listed options.")
+
+def prompt_manual_qid():
+    qid = prompt_text(
+        "Your Q-number is in your wikidata.org page URL, like Q12345.",
+        required=False)
+    return normalize_qid_input(qid)
+
+def prompt_wikidata_choice(candidates):
+    choices = [
+        (wikidata_candidate_label(candidate), candidate["id"], candidate.get("description", ""))
+        for candidate in candidates
+    ]
+    choices.append(("None of these / enter a Q-number myself", MANUAL_QID_CHOICE, ""))
+    choices.append(("Skip — don't set up photos of you", SKIP_QID_CHOICE, ""))
+    choice = prompt_select("Which of these is you?", choices)
+    if choice == MANUAL_QID_CHOICE:
+        return prompt_manual_qid()
+    if choice == SKIP_QID_CHOICE:
+        return None
+    return choice
+
+def prompt_manual_or_skip_qid():
+    choice = prompt_select("Which of these is you?", [
+        ("None of these / enter a Q-number myself", MANUAL_QID_CHOICE, ""),
+        ("Skip — don't set up photos of you", SKIP_QID_CHOICE, ""),
+    ])
+    if choice == MANUAL_QID_CHOICE:
+        return prompt_manual_qid()
+    return None
+
+def interactive_wikidata_qid(author, fetcher=None):
+    existing_qid = identity_default("qid", "WIKI_QID")
+    if existing_qid:
+        return existing_qid
+    print("Looking you up on Wikidata…")
+    if fetcher is None:
+        fetcher = fetch_wikidata_candidates
+    try:
+        candidates = fetcher(author)
+    except Exception:
+        print("Couldn't reach Wikidata to look you up; enter your Q-number manually or skip.")
+        return prompt_manual_or_skip_qid()
+    if not candidates:
+        print("No Wikidata item found for '%s' — you may not have one." % author)
+        return prompt_manual_or_skip_qid()
+    return prompt_wikidata_choice(candidates)
+
+def print_no_wikidata_message():
+    print("Without a Wikidata ID, Credit Check can't identify photos of you, "
+          "so there's nothing to scan yet. Once you have your Q-number, "
+          "choose this again.")
+
 def existing_review_default():
     preferred = preference_value("review_path", "out")
     candidates = []
@@ -2914,17 +3908,18 @@ def setup_complete():
 def guided_review_path():
     review = existing_review_default()
     if not os.path.exists(review):
-        print("No review file found. Choose Find your photos on Wikipedia first.")
+        print(missing_review_message(guided=True))
         return None
     return review
 
 def open_review_from_guided_flow(review, initial_mode="all"):
     if browser_review_should_fallback(False):
         print("Browser review is not available here; using terminal review instead.")
-        return review_file_interactive(review)
-    ok = review_file_web(review, fallback_on_open_failure=True, initial_mode=initial_mode)
+        return review_file_interactive(review, guided=True)
+    ok = review_file_web(review, fallback_on_open_failure=True,
+                         initial_mode=initial_mode, guided=True)
     if ok is None:
-        return review_file_interactive(review)
+        return review_file_interactive(review, guided=True)
     return ok
 
 def review_workflow_state():
@@ -2952,16 +3947,25 @@ def review_state_label(state):
     if not state["setup_complete"] and not state["exists"]:
         return "Set up Credit Check to start"
     if not state["exists"]:
-        return "No review yet"
+        return "Ready to find your photos"
     prefix = "" if state["setup_complete"] else "Setup incomplete · "
     if state["total"] == 0:
-        return "%s%s has no photos to review" % (prefix, state["review"])
+        return "%sYou're all caught up — re-scan to check for new photos" % prefix
     text = "%d photos found · %d selected" % (state["total"], state["selected"])
     if state["ambiguous"]:
         text += " · %d ambiguous" % state["ambiguous"]
     return prefix + text
 
-def review_unavailable_message(review):
+def review_unavailable_message(review, guided=False):
+    if guided:
+        if questionary is None or Application is None:
+            print("The terminal photo picker needs questionary and prompt_toolkit. The installed Credit Check command has them.")
+        elif not sys.stdin.isatty() or not sys.stdout.isatty():
+            print("The terminal photo picker needs an interactive terminal.")
+        else:
+            print("The terminal photo picker is disabled because %s is set." %
+                  PLAIN_PROMPTS_ENV)
+        return
     if questionary is None or Application is None:
         print("Terminal review needs questionary and prompt_toolkit. The installed pipx "
               "command has them; otherwise tick [X] by editing %s." % review)
@@ -2972,26 +3976,23 @@ def review_unavailable_message(review):
         print("Terminal checkbox review is disabled because %s is set. Tick [X] by editing %s."
               % (PLAIN_PROMPTS_ENV, review))
 
-def review_file_interactive(review):
+def review_file_interactive(review, guided=False):
     if not os.path.exists(review):
-        print("No review file found: %s. Choose Find your photos on Wikipedia first." % review)
+        print(missing_review_message(guided))
         return False
 
     items = parse_review_items(review)
     approvable = [item for item in items if item["target"]]
+    ambiguous_count = len([item for item in items if not item["target"]])
     if not items:
-        print("%s has no photos in it. Run Find your photos on Wikipedia again." % review)
+        print(empty_review_message(guided))
         return True
     if not approvable:
-        ambiguous_count = len([item for item in items if not item["target"]])
-        if ambiguous_count:
-            print("%s only has ambiguous photos. Edit the review file to move any real matches under a category before selecting them." % review)
-        else:
-            print("No photos to review in %s." % review)
+        print(no_approvable_review_message(ambiguous_count, guided))
         return True
 
     if not fancy_prompts_available():
-        review_unavailable_message(review)
+        review_unavailable_message(review, guided=guided)
         return True
 
     return review_file_with_pages(review, items, approvable)
@@ -3020,14 +4021,16 @@ def cmd_web(args):
         sys.exit(1)
 
 def interactive_scan(scan_mode="by"):
-    username = prompt_text(
-        "Commons username",
-        identity_default("username", "WIKI_USERNAME"),
-        required=True)
-    author = prompt_text(
-        "Your name as it's credited on Commons",
-        identity_default("author", "WIKI_AUTHOR"),
-        required=True)
+    if scan_mode == "of":
+        print("This finds portraits of you that other people shot and uploaded.")
+        print("")
+
+    username = identity_default("username", "WIKI_USERNAME")
+    if not username:
+        username = prompt_text("Commons username", required=True)
+    author = identity_default("author", "WIKI_AUTHOR")
+    if not author:
+        author = prompt_text("Your name as it's credited on Commons", required=True)
     by_default = identity_default(
         "by_category", "WIKI_BY_CATEGORY", "Photographs by %s" % author)
     of_cat = qid = None
@@ -3035,23 +4038,24 @@ def interactive_scan(scan_mode="by"):
     if scan_mode == "of":
         by_cat = by_default
         of_cat = prompt_text(
-            "Category for photos of you",
+            "Commons category for photos of you",
             identity_default("of_category", "WIKI_OF_CATEGORY", author),
             required=True)
-        qid = prompt_text(
-            "Your Wikidata ID (turns on 'photos of you' detection)",
-            identity_default("qid", "WIKI_QID"),
-            required=True)
+        qid = interactive_wikidata_qid(author)
+        if not qid:
+            print_no_wikidata_message()
+            return
     else:
-        by_cat = prompt_text("Your photographer category", by_default, required=True)
+        by_cat = by_default
 
-    updates = {
-        "username": username,
-        "author": author,
-        "by_category": by_cat,
-    }
     if scan_mode == "of":
-        updates.update({"of_category": of_cat, "qid": qid})
+        updates = {"of_category": of_cat, "qid": qid}
+    else:
+        updates = {
+            "username": username,
+            "author": author,
+            "by_category": by_cat,
+        }
     save_local_preferences(updates)
 
     review_format = infer_review_format(argparse.Namespace(review_format=None, out=None))
@@ -3081,26 +4085,14 @@ def interactive_settings():
         identity_default("author", "WIKI_AUTHOR"),
         required=True)
     by_cat = prompt_text(
-        "Your photographer category",
+        "Commons category for photos you took",
         identity_default("by_category", "WIKI_BY_CATEGORY",
                          "Photographs by %s" % author),
         required=True)
-    print("")
-    print("Optional: set your Wikidata ID to also find portraits of you taken by other people.")
-    of_cat = prompt_text(
-        "Category for photos of you",
-        identity_default("of_category", "WIKI_OF_CATEGORY", author),
-        required=False)
-    qid = prompt_text(
-        "Your Wikidata ID",
-        identity_default("qid", "WIKI_QID"),
-        required=False)
     save_local_preferences({
         "username": username,
         "author": author,
         "by_category": by_cat,
-        "of_category": of_cat,
-        "qid": qid,
     })
     print("Saved settings to %s." % PREFERENCE_FILE)
 
@@ -3109,37 +4101,24 @@ def interactive_review(initial_mode="all"):
     if review:
         open_review_from_guided_flow(review, initial_mode=initial_mode)
 
-def interactive_plan():
-    review = guided_review_path()
-    if not review:
-        return
-    approved = load_approved(review)
-    if not approved:
-        print("Opening review so you can pick photos first.")
-        open_review_from_guided_flow(review)
-        return
-    print_plan(approved, review,
-               "credit-check commit %s --go" % review_path_arg(review))
-
 def interactive_preview_and_commit():
     review = guided_review_path()
     if not review:
         return
-    approved = load_approved(review)
+    approved = load_approved(review, warn=False)
     if not approved:
-        print("Opening review so you can pick photos first.")
+        print("Opening the photo picker so you can choose photos first.")
         open_review_from_guided_flow(review)
         return
-    print_plan(approved, review,
-               "credit-check commit %s --go" % review_path_arg(review))
+    print_plan(approved, review, guided=True)
     print("")
-    print("This will edit Commons file pages.")
-    if not prompt_yes_no("Actually make these edits now?", False):
+    print("This will add categories on Wikimedia Commons.")
+    if not prompt_yes_no("Add these categories now?", False):
         print("No edits made.")
         return
     args = argparse.Namespace(review=review, go=True, summary=(
-        "Add photographer/subject category (own work in use on Wikipedia)"),
-        throttle=5.0, botuser=None, botpass=None)
+        "Add photographer or photos-of-you category"),
+        throttle=5.0, botuser=None, botpass=None, guided=True)
     cmd_commit(args)
 
 def interactive_commit():
@@ -3149,62 +4128,55 @@ def interactive_menu_actions(state):
     if not state["setup_complete"]:
         primary_value = "settings"
         primary_label = "Set up Credit Check"
-        primary_desc = "Save your Commons account, credited name, and photographer category."
+        primary_desc = "Save your Commons account, credited name, and category."
     elif not state["exists"]:
         primary_value = "scan_by"
         primary_label = "Find your photos on Wikipedia"
-        primary_desc = "Search Commons for credited photos missing your category."
+        primary_desc = "Find photos credited to you that are used on Wikipedia and missing your category."
+    elif state["total"] == 0:
+        primary_value = "scan_by"
+        primary_label = "Scan again for new photos"
+        primary_desc = "Check whether new Wikipedia-used photos now need your category."
     elif state["selected"]:
         primary_value = "add"
-        primary_label = "Add your selected photos to Commons"
-        primary_desc = "Show the exact edits, then confirm before changing Commons."
+        primary_label = "Add selected photos to your category page on Wikimedia Commons"
+        primary_desc = "Show the exact Commons edits, then confirm before changing anything."
     else:
         primary_value = "review"
-        primary_label = "Review found photos"
-        primary_desc = "Open the browser contact sheet and pick photos."
+        primary_label = "Choose photos to add"
+        primary_desc = "Open the browser photo picker and choose photos."
     actions = [(primary_label, primary_value, primary_desc)]
     if primary_value != "scan_by":
+        if state["exists"]:
+            actions.append((
+                "Scan again for new photos",
+                "scan_by",
+                "Search again for new photos you've uploaded or that are newly "
+                "used on Wikipedia. Replaces the current found photos.",
+            ))
+        else:
+            actions.append((
+                "Find your photos on Wikipedia",
+                "scan_by",
+                "Find photos credited to you that are used on Wikipedia and missing your category.",
+            ))
+    if state["total"] > 0 and primary_value != "review":
         actions.append((
-            "Find your photos on Wikipedia",
-            "scan_by",
-            "Search Commons for credited photos missing your category.",
-        ))
-    elif state["exists"]:
-        actions.append((
-            "Find your photos again",
-            "scan_by",
-            "Run a fresh scan and replace the local review file.",
-        ))
-    if state["exists"] and primary_value != "review":
-        actions.append((
-            "Review found photos",
+            "Choose photos to add",
             "review",
-            "Open a local browser contact sheet and save the photos you pick.",
-        ))
-    if state["selected"]:
-        actions.append((
-            "Review selected photos",
-            "review_selected",
-            "Open the browser contact sheet showing only what you picked.",
+            "Open the browser photo picker and choose photos.",
         ))
     if primary_value != "settings":
         actions.append((
             "Settings",
             "settings",
-            "Save your name, Commons account, and categories for this folder.",
+            "Save your name, Commons account, and category for photos you took.",
         ))
-    if state["selected"]:
-        actions.append((
-            "Preview edits in the terminal",
-            "plan",
-            "Show exactly which Commons pages would change.",
-        ))
-    if has_subject_scan_settings():
-        actions.append((
-            "Find photos of you by other people",
-            "scan_of",
-            "Use your Wikidata ID to add portraits to your subject category.",
-        ))
+    actions.append((
+        "Find photos *of* you",
+        "scan_of",
+        "Find portraits of you taken by other people and add them to your category for photos of you.",
+    ))
     if interactive_dev_mode():
         actions += [
             ("Run local tool checks", "self_test",
@@ -3258,7 +4230,7 @@ def interactive_menu_choice():
 
 def interactive_choice_action(choice):
     if choice in ("self_test", "smoke", "scan_by", "scan_of", "review",
-                  "review_selected", "plan", "settings", "add", "quit"):
+                  "settings", "add", "quit"):
         return choice
     if str(choice).lower() in ("q", "quit", "exit"):
         return "quit"
@@ -3289,10 +4261,6 @@ def cmd_interactive(args):
             interactive_scan("of")
         elif action == "review":
             interactive_review()
-        elif action == "review_selected":
-            interactive_review(initial_mode="selected")
-        elif action == "plan":
-            interactive_plan()
         elif action == "settings":
             interactive_settings()
         elif action == "add":
@@ -3364,9 +4332,11 @@ def main():
 
     c = sub.add_parser("commit", help="add your category to the photos you picked")
     c.add_argument("review")
-    c.add_argument("--go", action="store_true", help="actually edit (default: dry run)")
-    c.add_argument("--summary", default="Add photographer/subject category (own work in use on Wikipedia)")
-    c.add_argument("--throttle", type=float, default=5.0)
+    c.add_argument("--go", action="store_true",
+                   help="actually edit (default: preview only)")
+    c.add_argument("--summary", default="Add photographer or photos-of-you category")
+    c.add_argument("--throttle", type=float, default=5.0,
+                   help="seconds to pause between edits (default: 5)")
     c.add_argument("--botuser"); c.add_argument("--botpass")
     c.set_defaults(func=cmd_commit)
 

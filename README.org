@@ -7,9 +7,13 @@ your photos, then adds those photos (or a subset you pick) to a category page on
 Wikimedia Commons — using a category name like =Photographs by Jay Dixit= — so
 you can easily keep track of which Wikipedia articles use your photos.
 
-That is the main workflow. If you also provide a subject category and Wikidata
-QID, Credit Check can put photos of you taken by other people in a separate
-review section.
+<p align="center">
+  <img src="assets/credit-check-hero.jpeg" alt="Credit Check screenshot showing selected Wikimedia Commons photos, Wikipedia usage, and a photographer category" width="100%">
+</p>
+
+That is the main workflow. If you also provide a category for photos of you and
+a Wikidata QID, Credit Check can put photos of you taken by other people in a
+separate review section.
 
 Run =credit-check= to start the guided command-line app. Credit Check writes a
 plain Markdown review file first, opens a local browser contact sheet so you
@@ -26,7 +30,7 @@ can pick photos visually, and edits Commons only when you confirm =commit
 3. *Spots the gaps.* Flags the ones missing =Category:Photographs by <you>=.
 4. *Sorts you from subjects.* Photos you took go one way. Photos that merely
    depict you (shot by someone else) never land in your "Photographs by"
-   category, and can go to your own subject category instead.
+   category, and can go to a category for photos of you instead.
 5. *Traces crops.* If a crop dropped your credit but still cites your original
    file as its source, Credit Check follows the trail and claims it anyway.
 6. *Waits for your yes.* Nothing is edited until you tick a box.
@@ -66,15 +70,17 @@ Start the guided command-line app:
 
 If this is your first run, it starts with setup: your Commons username, your
 credited name, and your photographer category. After that, it shows the current
-review status and puts the natural next action first: find your photos, review
-found photos, or add the photos you picked. If you add your Wikidata ID in
-Settings, a separate optional action appears for photos of you taken by other
-people.
+photo status and puts the natural next action first: find your photos, choose
+photos to add, or add the photos you picked. A separate optional action is always
+available for photos of you taken by other people; it looks up matching
+Wikidata items by your name when you choose it.
 
-In guided mode, Credit Check uses the local review file automatically. After a
-scan, it opens the browser review instead of asking you which file to use. The
-Settings action saves your Commons username, credited name, and categories in
-[[file:.credit-check.json][.credit-check.json]] for this folder, so you do not have to re-enter them.
+In guided mode, Credit Check keeps track of the found photos automatically.
+After a scan, it opens the browser photo picker instead of asking you which file
+to use. The
+Settings action saves your Commons username, credited name, and photographer
+category in [[file:.credit-check.json][.credit-check.json]] for this folder, so you do not have to
+re-enter them.
 
 * Direct commands
 
@@ -102,7 +108,7 @@ Set your identity once. Put this in your shell profile if you like:
 That's enough to start. Optional extras:
 
 : export WIKI_BY_CATEGORY='Photographs by Jay Dixit'   # defaults to "Photographs by <author>"
-: export WIKI_OF_CATEGORY='Jay Dixit'                  # subject category, for photos that depict you
+: export WIKI_OF_CATEGORY='Jay Dixit'                  # category for photos of you
 : export WIKI_QID='Q12345'                             # your Wikidata id, enables depicts detection
 
 You can also pass any of these as flags (=--username=, =--author=, and so on),
@@ -173,20 +179,18 @@ Open the local browser picker:
 : credit-check review review.md
 
 It opens a contact sheet at =127.0.0.1= with Commons thumbnails, category
-sections, search, visible review modes (=All=, =Selected=, and =Still deciding=),
-select-visible/select-all buttons, and links that open each file on Commons.
+sections, search, review modes (=All=, =Selected=, and =Not selected yet=),
+select-shown/select-all buttons, and links that open each file on Commons.
 Selected photos get a visible badge and left stripe so you can scan the page
-quickly. Use =Preview edits= to see the exact category edits for the photos
-you picked before you leave the browser. The page saves your choices back into
-=review.md= and shows the next command after saving. Use =Save and close= when
-you are done.
+quickly. The =Commons edits= panel updates automatically with the exact category
+edits for the photos you picked. The page saves your choices automatically. Use
+=Done= when you are finished.
 
 Browser shortcuts:
 
 - =/= focuses search.
 - =Space= toggles the focused photo.
 - =o= opens the focused photo on Commons.
-- =s= saves your choices.
 
 To open the browser directly in selected-only mode:
 
@@ -246,8 +250,7 @@ This never logs in — it just prints the edits it would make:
 
 : credit-check plan review.md
 
-You can also preview the same edits inside the browser review with
-=Preview edits=.
+The browser review shows the same edits live as you pick photos.
 
 *** 4. Commit
 
@@ -259,7 +262,7 @@ Credit Check logs in, re-checks each file (skipping any already categorized),
 and appends the category with a clear edit summary, pausing a few seconds
 between edits. When it finishes, it shows how many photos were added, already
 present, or failed, links to the category page, and tells you whether any
-unchecked photos remain in =review.md=.
+photos you did not select remain.
 
 * Making edits: the bot password
 
@@ -298,8 +301,8 @@ On =commit=:
 
 | Option           | What it does                                     |
 |------------------+--------------------------------------------------|
-| =--go=           | Actually edit (default is a dry run)             |
-| =--throttle S=   | Seconds between edits (default 5)                |
+| =--go=           | Actually edit (default is preview only)          |
+| =--throttle S=   | Seconds to pause between edits (default 5)       |
 | =--summary '...'= | Custom edit summary                             |
 
 Other commands:
@@ -310,7 +313,7 @@ Other commands:
 | =smoke=            | Runs a read-only Commons smoke test               |
 | =interactive=      | Starts the guided command-line app                |
 | =review REVIEW=    | Opens the local browser picker for your photos    |
-| =review --selected REVIEW= | Opens the browser on your selected photos |
+| =review --selected REVIEW= | Opens the browser filtered to photos you selected |
 | =web REVIEW=       | Same browser picker, kept as an explicit alias    |
 | =plan REVIEW=      | Prints planned edits for the photos you checked   |
 
@@ -318,25 +321,26 @@ Other commands:
 
 By default Credit Check ignores photos of you: a portrait someone else shot
 won't be filed under "Photographs by you." In the guided app, choose =Find
-photos of you by other people= after adding your Wikidata ID in Settings. If you
-use direct commands and have a Wikidata item, point the tool at it:
+photos of you by other people=; Credit Check looks up matching Wikidata items so
+you can pick yourself, or skip cleanly if none of them are you. If you use direct
+commands and have a Wikidata item, point the tool at it:
 
 : credit-check scan --of-category 'Jay Dixit' --qid Q12345
 
 Files that Commons structured data says depict you (and that you didn't shoot)
 land in their own section. If you pick them, Credit Check adds them to your
-subject category.
+category for photos of you.
 
 * Good Commons manners
 
 Credit Check is built to be a considerate editor, and you should run it like
 one:
 
-- Nothing is edited unless you pick it. Dry run is the default.
+- Nothing is edited unless you pick it and confirm. Preview is the default.
 - It appends only. It never rewrites a page, reorders categories, or touches
   license, author, or description fields.
 - It re-checks every file right before editing, so it won't add a duplicate.
-- It throttles between edits and backs off while fetching or logging in if
+- It pauses between edits and backs off while fetching or logging in if
   Commons asks it to slow down.
 - It does not blindly retry edit submissions after a lost network response; it
   reports that file as failed so you can re-run safely after checking the page.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "credit-check"
 version = "1.0.0"
-description = "Find your Wikipedia-used Wikimedia Commons photos and add your photographer category, with human approval."
+description = "Keep track of which Wikipedia articles use your photos."
 readme = {file = "README.org", content-type = "text/plain"}
 requires-python = ">=3.8"
 license = {text = "MIT"}
