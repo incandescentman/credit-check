@@ -1611,7 +1611,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
   function nextStepText() {
     if (guidedMode) {
-      return "You're all set - close this and choose Add selected photos to your category page on Wikimedia Commons from the menu.";
+      return "You're all set - close this and choose Add selected photos to your photographer category page on Wikimedia Commons from the menu.";
     }
     return `Next: credit-check commit ${reviewArg} --go`;
   }
@@ -2084,7 +2084,7 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
 
     if server.saved_count is not None:
         if guided:
-            print("%d photo(s) selected. Next: choose Add selected photos to your category page on Wikimedia Commons." %
+            print("%d photo(s) selected. Next: choose Add selected photos to your photographer category page on Wikimedia Commons." %
                   server.saved_count)
         else:
             print("%d photo(s) selected. Next: credit-check commit %s --go" %
@@ -2508,7 +2508,7 @@ def print_commit_done_summary(added, skipped, failed, review, approved, guided=F
     if failed:
         print("")
         if guided:
-            print("Some photos failed. Check the messages above, then choose Add selected photos to your category page on Wikimedia Commons again when you're ready.")
+            print("Some photos failed. Check the messages above, then choose Add selected photos to your photographer category page on Wikimedia Commons again when you're ready.")
         else:
             print("Some photos failed. Check the messages above, then run credit-check plan %s before trying again." %
                   review_path_arg(review))
@@ -2846,7 +2846,7 @@ def check_guided_menu_visibility():
             selected_labels = [label for label, _value, _desc in selected_actions]
             selected_values = [value for _label, value, _desc in selected_actions]
             check_equal("selected menu primary label", selected_labels[0],
-                        "Add selected photos to your category page on Wikimedia Commons")
+                        "Add selected photos to your photographer category page on Wikimedia Commons")
             if "plan" in selected_values:
                 raise AssertionError("selected menu must not offer terminal preview")
             if "review_selected" in selected_values:
@@ -2913,7 +2913,7 @@ def check_guided_menu_copy_matrix():
             "Open the browser photo picker and choose photos.",
         )
         add = (
-            "Add selected photos to your category page on Wikimedia Commons",
+            "Add selected photos to your photographer category page on Wikimedia Commons",
             "add",
             "Preview the Commons edits, then add them.",
         )
@@ -3641,7 +3641,7 @@ def check_web_review_html():
     if 'window.CREDIT_CHECK_INITIAL_MODE = "selected"' not in selected_text:
         raise AssertionError("web review selected-only mode was not embedded")
     guided_text = web_review_html("review.md", [item], guided=True)
-    if "You're all set - close this and choose Add selected photos to your category page on Wikimedia Commons from the menu." not in guided_text:
+    if "You're all set - close this and choose Add selected photos to your photographer category page on Wikimedia Commons from the menu." not in guided_text:
         raise AssertionError("guided web review next step was not embedded")
 
 def check_commit_summary_helpers():
@@ -4451,7 +4451,7 @@ def interactive_menu_actions(state):
             primary_desc = "Look for new photos of yours now used on Wikipedia."
     elif state["selected"]:
         primary_value = "add"
-        primary_label = "Add selected photos to your category page on Wikimedia Commons"
+        primary_label = "Add selected photos to your photographer category page on Wikimedia Commons"
         primary_desc = "Preview the Commons edits, then add them."
     else:
         primary_value = "review"
@@ -4660,7 +4660,7 @@ def main():
     p.add_argument("review")
     p.set_defaults(func=cmd_plan)
 
-    c = sub.add_parser("commit", help="add your category to the photos you picked")
+    c = sub.add_parser("commit", help="add your photographer category to the photos you picked")
     c.add_argument("review")
     c.add_argument("--go", action="store_true",
                    help="actually edit (default: preview only)")
