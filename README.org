@@ -179,8 +179,9 @@ one-time cleanup of your own photos, a normal login is generally fine.
 * What it won't do
 
 It won't upload files, edit Wikipedia articles, rewrite your metadata, or add
-event or location categories. Its job is narrow on purpose: get your
-Wikipedia-used photos into your photographer category.
+event or location categories. Its job is narrow on purpose: find photos
+you've taken that appear on Wikipedia and add them to your Wikimedia
+Commons photographer category.
 
 * The payoff
 

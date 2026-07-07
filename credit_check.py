@@ -773,6 +773,48 @@ def parse_review_items(path):
             item_label, item_uses = None, None
     return items
 
+def review_section_context(path):
+    """Infer what kind of scan produced a review from its generated headings."""
+    ext = os.path.splitext(path)[1].lower()
+    allow_org = ext not in (".md", ".markdown")
+    allow_md = ext != ".org"
+    context = {
+        "has_by_section": False,
+        "has_of_section": False,
+        "has_ambiguous_section": False,
+        "by_category": None,
+        "of_category": None,
+    }
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            lower = line.lower()
+            mt = None
+            if allow_org:
+                mt = ORG_HEAD_TARGET_RE.match(line)
+            if not mt and allow_md:
+                mt = MD_HEAD_TARGET_RE.match(line)
+            if mt:
+                category = mt.group(1)
+                if "photos of you" in lower:
+                    context["has_of_section"] = True
+                    context["of_category"] = category
+                elif "photos you took" in lower:
+                    context["has_by_section"] = True
+                    context["by_category"] = category
+                continue
+            if ((allow_org and ORG_SECTION_RE.match(line)) or
+                    (allow_md and MD_SECTION_RE.match(line))):
+                if "ambiguous" in lower:
+                    context["has_ambiguous_section"] = True
+    return context
+
+def review_mode_from_context(context):
+    if (context.get("has_of_section") and
+            not context.get("has_by_section") and
+            not context.get("has_ambiguous_section")):
+        return "of"
+    return "by"
+
 def set_review_approvals(path, items, selected_lines):
     """Rewrite checkbox marks only for review photos with a target category."""
     with open(path, encoding="utf-8") as f:
@@ -1954,10 +1996,20 @@ def missing_review_message(guided=False):
         return "No photos found yet. Choose Find your photos on Wikipedia first."
     return "Review file not found. Run credit-check scan first."
 
-def empty_review_message(guided=False):
+def photo_count_text(count):
+    return "%d photo" % count if count == 1 else "%d photos" % count
+
+def empty_review_message(guided=False, review_mode="by"):
+    if review_mode == "of":
+        return ("Credit Check didn't find any photos of you. You need to put the "
+                "camera down and step in front of the lens once in a while!")
     if guided:
         return "You're all caught up. Choose Scan again for new photos when you want to check again."
     return "Your review is empty. Run credit-check scan again."
+
+def guided_review_open_message(approvable_count, ambiguous_count):
+    return "Opening the photo picker in your browser for %s." % (
+        photo_count_text(approvable_count))
 
 def no_approvable_review_message(ambiguous_count, guided=False):
     if ambiguous_count:
@@ -1978,7 +2030,8 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     approvable = [item for item in items if item["target"]]
     ambiguous_count = len([item for item in items if not item["target"]])
     if not items:
-        print(empty_review_message(guided))
+        print(empty_review_message(guided, review_mode_from_context(
+            review_section_context(review))))
         return True
     if not approvable:
         print(no_approvable_review_message(ambiguous_count, guided))
@@ -1997,11 +2050,17 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     server.saved_count = None
     url = server.review_origin + "/"
 
-    print("Opening photo picker in your browser for %d photo(s)." % len(approvable))
-    if not guided:
+    if guided:
+        print(guided_review_open_message(len(approvable), ambiguous_count))
+    else:
+        print("Opening photo picker in your browser for %d photo(s)." % len(approvable))
         print("Review file: %s" % os.path.abspath(review))
-    print("URL: %s" % url)
-    print("Use Done in the browser, or press Ctrl-C here to stop.")
+    if guided:
+        print("If the browser doesn't open, use this URL: %s" % url)
+        print("Use Done in the browser when you're finished.")
+    else:
+        print("URL: %s" % url)
+        print("Use Done in the browser, or press Ctrl-C here to stop.")
 
     if open_browser:
         try:
@@ -2275,9 +2334,16 @@ def cmd_scan(args):
     reasons = discover_titles(cl, username, author, insource_user)
     candidate_count = len(reasons)
     if candidate_count == 0:
-        print("  found no files for user %s - check your Commons username in Settings."
-              % username, file=sys.stderr)
-        return
+        if getattr(args, "guided", False):
+            if scan_mode == "of":
+                print(empty_review_message(review_mode="of"))
+            else:
+                print("Credit Check couldn't find any Commons photos credited to you. "
+                      "Double-check your Commons username and credited name in Settings.")
+        else:
+            print("  found no files for user %s - check your Commons username in Settings."
+                  % username, file=sys.stderr)
+        return False
     print("  %d possible matches. Fetching usage, categories, wikitext..." % candidate_count,
           file=sys.stderr)
     info = fetch_details(cl, reasons.keys(), by_cat, of_cat)
@@ -2327,6 +2393,12 @@ def cmd_scan(args):
         "include_ambiguous": include_ambiguous,
     }
     write_review(by_list, of_list, amb_list, meta, out, review_format)
+    if getattr(args, "guided", False):
+        return True
+    of_only_empty = include_of and not include_by and not include_ambiguous and not of_list
+    if of_only_empty:
+        print(empty_review_message(review_mode="of"), file=sys.stderr)
+        return
     print("\nWrote %s" % out, file=sys.stderr)
     if include_by:
         print("  by  (photos you took, missing [[Category:%s]]): %d photos, used %d times"
@@ -2341,6 +2413,7 @@ def cmd_scan(args):
     if not by_list and not of_list and not amb_list:
         print("  no missing-category photos found. You may already be caught up.",
               file=sys.stderr)
+    return True
 
 
 def login(cl, botuser, botpass):
@@ -2684,6 +2757,21 @@ def check_guided_review_state():
             check_equal("guided empty review label", review_state_label(state),
                         "You're all caught up — re-scan to check for new photos")
 
+            write_review({}, {}, amb_list, meta, "review.md", "markdown")
+            state = review_workflow_state()
+            check_equal("guided ambiguous-only review total", state["total"], 0)
+            check_equal("guided ambiguous-only label", review_state_label(state),
+                        "Found some photos, but none had a clear category yet")
+
+            _by_list, _of_list, _amb_list, of_meta = sample_of_review_data()
+            write_review({}, {}, {}, of_meta, "review.md", "markdown")
+            state = review_workflow_state()
+            check_equal("guided empty of-review mode", state["review_mode"], "of")
+            check_equal("guided empty of-review category",
+                        state["of_category"], "Test Person")
+            check_equal("guided empty of-review label", review_state_label(state),
+                        "No new photos of you this time")
+
             write_review(by_list, of_list, amb_list, meta, "review.md", "markdown")
             state = review_workflow_state()
             check_equal("guided review exists", state["exists"], True)
@@ -2802,17 +2890,22 @@ def check_guided_menu_copy_matrix():
         find = (
             "Find your photos on Wikipedia",
             "scan_by",
-            "Find photos credited to you that are used on Wikipedia and missing your category.",
+            "Find photos credited to you that Wikipedia is using but that aren't in your photographer category yet.",
         )
         scan_again = (
             "Scan again for new photos",
             "scan_by",
-            "Search again for new photos you've uploaded or that are newly used on Wikipedia. Replaces the current found photos.",
+            "Search again for new photos you've uploaded or that are newly used on Wikipedia. Replaces the photos found so far.",
         )
         caught_up_scan = (
             "Scan again for new photos",
             "scan_by",
-            "Check whether new Wikipedia-used photos now need your category.",
+            "Look for new photos of yours now used on Wikipedia.",
+        )
+        search_of_again = (
+            "Search for photos of you again",
+            "scan_of",
+            "Look again for portraits of you taken by other people.",
         )
         choose = (
             "Choose photos to add",
@@ -2835,8 +2928,14 @@ def check_guided_menu_copy_matrix():
              [find, settings, start_over, photos_of_you, quit_action]),
             ("caught up",
              {"setup_complete": True, "exists": True, "total": 0,
-              "selected": 0, "ambiguous": 0, "review": "review.md"},
+              "selected": 0, "ambiguous": 0, "review": "review.md",
+              "review_mode": "by", "of_category": None},
              [caught_up_scan, settings, start_over, photos_of_you, quit_action]),
+            ("no photos of you",
+             {"setup_complete": True, "exists": True, "total": 0,
+              "selected": 0, "ambiguous": 0, "review": "review.md",
+              "review_mode": "of", "of_category": "Test Person"},
+             [search_of_again, scan_again, settings, start_over, quit_action]),
             ("choose photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 1, "review": "review.md"},
@@ -2867,6 +2966,12 @@ def check_guided_copy_messages():
     check_equal("guided empty-results message",
                 empty_review_message(guided=True),
                 "You're all caught up. Choose Scan again for new photos when you want to check again.")
+    check_equal("guided empty photos-of-you message",
+                empty_review_message(guided=True, review_mode="of"),
+                "Credit Check didn't find any photos of you. You need to put the camera down and step in front of the lens once in a while!")
+    check_equal("guided review-open message",
+                guided_review_open_message(54, 13),
+                "Opening the photo picker in your browser for 54 photos.")
     check_equal("guided ambiguous-results message",
                 no_approvable_review_message(1, guided=True),
                 "Credit Check found photos, but couldn't tell which category to use for them, so there are no photos to choose yet.")
@@ -2893,6 +2998,14 @@ def check_guided_copy_messages():
             check_equal("guided terminal empty output",
                         sys.stdout.getvalue().strip(),
                         empty_review_message(guided=True))
+
+            _by_list, _of_list, _amb_list, of_meta = sample_of_review_data()
+            write_review({}, {}, {}, of_meta, "review.md", "markdown")
+            sys.stdout = io.StringIO()
+            review_file_web("review.md", open_browser=False, guided=True)
+            check_equal("guided web photos-of-you empty output",
+                        sys.stdout.getvalue().strip(),
+                        empty_review_message(guided=True, review_mode="of"))
 
             write_review({}, {}, amb_list, meta, "review.md", "markdown")
             sys.stdout = io.StringIO()
@@ -3096,7 +3209,7 @@ def check_interactive_start_over():
             prefs = local_preferences()
             check_equal("start-over confirmation default", confirmations, [(
                 "Start over with a different photographer? This clears saved details "
-                "and current found photos.",
+                "and the photos found so far.",
                 False,
             )])
             check_equal("start-over prompts", [p[0] for p in prompts], [
@@ -3122,7 +3235,7 @@ def check_interactive_start_over():
             check_equal("start-over scan author", args.author, "New Author")
             check_equal("start-over scan category", args.by_category,
                         "Photographs by New Author")
-            if "Cleared saved details and current found photos." not in output:
+            if "Cleared saved details and the photos found so far." not in output:
                 raise AssertionError("missing start-over cleared message")
 
         with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
@@ -4086,10 +4199,15 @@ def review_workflow_state():
         "selected": 0,
         "ambiguous": 0,
         "setup_complete": setup_complete(),
+        "review_mode": "by",
+        "of_category": None,
     }
     if not state["exists"]:
         return state
     try:
+        context = review_section_context(review)
+        state["review_mode"] = review_mode_from_context(context)
+        state["of_category"] = context.get("of_category")
         items = parse_review_items(review)
         state["total"] = len([item for item in items if item["target"]])
         state["ambiguous"] = len([item for item in items if not item["target"]])
@@ -4104,7 +4222,11 @@ def review_state_label(state):
     if not state["exists"]:
         return "Ready to find your photos"
     prefix = "" if state["setup_complete"] else "Setup incomplete · "
+    if state["total"] == 0 and state["ambiguous"]:
+        return "%sFound some photos, but none had a clear category yet" % prefix
     if state["total"] == 0:
+        if state.get("review_mode") == "of":
+            return "%sNo new photos of you this time" % prefix
         return "%sYou're all caught up — re-scan to check for new photos" % prefix
     text = "%d photos found · %d selected" % (state["total"], state["selected"])
     if state["ambiguous"]:
@@ -4140,7 +4262,8 @@ def review_file_interactive(review, guided=False):
     approvable = [item for item in items if item["target"]]
     ambiguous_count = len([item for item in items if not item["target"]])
     if not items:
-        print(empty_review_message(guided))
+        print(empty_review_message(guided, review_mode_from_context(
+            review_section_context(review))))
         return True
     if not approvable:
         print(no_approvable_review_message(ambiguous_count, guided))
@@ -4228,9 +4351,9 @@ def run_guided_scan(username, author, by_cat, of_cat=None, qid=None, scan_mode="
         username=username, author=author, by_category=by_cat, of_category=of_cat,
         qid=qid, insource_user=insource_user, no_derivatives=not trace_derivatives,
         depth=depth, english_only=english_only, min_uses=min_uses,
-        review_format=review_format, out=out, scan_mode=scan_mode)
-    cmd_scan(args)
-    if sys.stdin.isatty():
+        review_format=review_format, out=out, scan_mode=scan_mode, guided=True)
+    wrote_review = cmd_scan(args)
+    if wrote_review and sys.stdin.isatty():
         open_review_from_guided_flow(out)
 
 def prompt_photographer_settings():
@@ -4261,7 +4384,7 @@ def interactive_settings():
 def interactive_start_over():
     if not prompt_yes_no(
             "Start over with a different photographer? This clears saved details "
-            "and current found photos.",
+            "and the photos found so far.",
             False):
         print("Keeping the current photographer.")
         return
@@ -4274,7 +4397,7 @@ def interactive_start_over():
         "by_category": settings["by_category"],
     })
     if removed:
-        print("Cleared saved details and current found photos.")
+        print("Cleared saved details and the photos found so far.")
     else:
         print("Cleared saved details.")
     run_guided_scan(settings["username"], settings["author"],
@@ -4316,11 +4439,16 @@ def interactive_menu_actions(state):
     elif not state["exists"]:
         primary_value = "scan_by"
         primary_label = "Find your photos on Wikipedia"
-        primary_desc = "Find photos credited to you that are used on Wikipedia and missing your category."
+        primary_desc = "Find photos credited to you that Wikipedia is using but that aren't in your photographer category yet."
     elif state["total"] == 0:
-        primary_value = "scan_by"
-        primary_label = "Scan again for new photos"
-        primary_desc = "Check whether new Wikipedia-used photos now need your category."
+        if state.get("review_mode") == "of":
+            primary_value = "scan_of"
+            primary_label = "Search for photos of you again"
+            primary_desc = "Look again for portraits of you taken by other people."
+        else:
+            primary_value = "scan_by"
+            primary_label = "Scan again for new photos"
+            primary_desc = "Look for new photos of yours now used on Wikipedia."
     elif state["selected"]:
         primary_value = "add"
         primary_label = "Add selected photos to your category page on Wikimedia Commons"
@@ -4336,13 +4464,13 @@ def interactive_menu_actions(state):
                 "Scan again for new photos",
                 "scan_by",
                 "Search again for new photos you've uploaded or that are newly "
-                "used on Wikipedia. Replaces the current found photos.",
+                "used on Wikipedia. Replaces the photos found so far.",
             ))
         else:
             actions.append((
                 "Find your photos on Wikipedia",
                 "scan_by",
-                "Find photos credited to you that are used on Wikipedia and missing your category.",
+                "Find photos credited to you that Wikipedia is using but that aren't in your photographer category yet.",
             ))
     if state["total"] > 0 and primary_value != "review":
         actions.append((
@@ -4362,11 +4490,12 @@ def interactive_menu_actions(state):
             "start_over",
             "Clear saved details and search for a new set of photos.",
         ))
-    actions.append((
-        "Find photos *of* you",
-        "scan_of",
-        "Find portraits of you taken by other people and add them to your category for photos of you.",
-    ))
+    if primary_value != "scan_of":
+        actions.append((
+            "Find photos *of* you",
+            "scan_of",
+            "Find portraits of you taken by other people and add them to your category for photos of you.",
+        ))
     if interactive_dev_mode():
         actions += [
             ("Run local tool checks", "self_test",
