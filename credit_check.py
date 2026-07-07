@@ -8,9 +8,9 @@ ones you pick. Works for any photographer, not one hard-coded person.
 
 It scans your own uploads as candidates, and reaches past them: any file whose
 *author/photographer field* credits you is found too, which includes cropped
-derivatives re-uploaded by other people. It also tells apart photos you TOOK
-from photos that merely DEPICT you, so a portrait of you by someone else never
-lands in "Photographs by <you>".
+derivatives re-uploaded by other people. It also tells apart photos you took
+from photos of you taken by someone else, so a portrait of you by another
+photographer never lands in "Photographs by <you>".
 
 WORKFLOW
     Run `credit-check` to start the guided command-line app, or use commands:
@@ -606,7 +606,7 @@ def write_markdown(by_list, of_list, amb_list, meta, path):
         for t, rec in sort_review_items(by_list): L += markdown_item_block(t, rec)
 
     if include_of and meta["of_category"]:
-        L.append("# Add to [Category:%s] - photos that depict you (%d)"
+        L.append("# Add to [Category:%s] - photos of you (%d)"
                  % (meta["of_category"], len(of_list)))
         L.append("")
         for t, rec in sort_review_items(of_list): L += markdown_item_block(t, rec)
@@ -642,7 +642,7 @@ def write_org(by_list, of_list, amb_list, meta, path):
         for t, rec in sort_review_items(by_list): L += org_item_block(t, rec)
 
     if include_of and meta["of_category"]:
-        L.append("* Add to [[Category:%s]] — photos that depict you (%d)"
+        L.append("* Add to [[Category:%s]] — photos of you (%d)"
                  % (meta["of_category"], len(of_list)))
         L.append("")
         for t, rec in sort_review_items(of_list): L += org_item_block(t, rec)
@@ -1335,7 +1335,7 @@ a {
     <div class="header-main">
       <div class="title-block">
         <p class="eyebrow">Credit Check</p>
-        <h1 id="screen-title">Review photos</h1>
+        <h1 id="screen-title">Choose photos to add</h1>
         <div class="summary" id="summary"></div>
       </div>
       <div class="save-actions">
@@ -1343,7 +1343,7 @@ a {
       </div>
     </div>
     <div class="toolbar-row primary-tools">
-      <input id="search" type="search" autocomplete="off" placeholder="Filter by filename, category, or use count">
+      <input id="search" type="search" autocomplete="off" placeholder="Filter by filename, category, or number of Wikipedia articles">
       <div class="mode-tabs" role="group" aria-label="Review mode">
         <button type="button" data-mode="all">All</button>
         <button type="button" data-mode="selected">Selected</button>
@@ -1413,13 +1413,14 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let selectionRevision = 0;
 
   if (singleTarget) {
-    screenTitle.textContent = `Review photos for Category:${targets[0]}`;
+    screenTitle.textContent = `Choose photos to add to Category:${targets[0]}`;
   } else {
-    screenTitle.textContent = `Review photos for ${targets.length} categories`;
+    screenTitle.textContent = `Choose photos to add to ${targets.length} categories`;
   }
   if (ambiguousCount > 0) {
-    const noun = ambiguousCount === 1 ? "photo was" : "photos were";
-    ambiguousNote.textContent = `${ambiguousCount} ambiguous ${noun} skipped because Credit Check couldn't choose a category.`;
+    const noun = ambiguousCount === 1 ? "photo needs" : "photos need";
+    const pron = ambiguousCount === 1 ? "it" : "they";
+    ambiguousNote.textContent = `${ambiguousCount} ${noun} a category before ${pron} can appear here.`;
     ambiguousNote.classList.add("show");
   }
 
@@ -1490,7 +1491,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function sectionHtml(group) {
-    const title = singleTarget ? "Photos credited to you, missing this category" : `Category:${group.target}`;
+    const title = singleTarget ? "Photos you can add to this category" : `Category:${group.target}`;
     const count = `${group.items.length} ${group.items.length === 1 ? "photo" : "photos"}`;
     const selected = group.items.filter((item) => item.selected).length;
     return `<section class="section">
@@ -2298,7 +2299,7 @@ def cmd_scan(args):
               % (by_cat, len(by_list), sum(len(r["wp"]) for r in by_list.values())),
               file=sys.stderr)
     if of_cat and include_of:
-        print("  of  (photos that depict you, missing [[Category:%s]]): %d photos"
+        print("  of  (photos of you, missing [[Category:%s]]): %d photos"
               % (of_cat, len(of_list)), file=sys.stderr)
     if include_ambiguous:
         print("  ambiguous (authorship or category unclear): %d photos" % len(amb_list),
@@ -2780,7 +2781,7 @@ def check_guided_menu_copy_matrix():
         add = (
             "Add selected photos to your category page on Wikimedia Commons",
             "add",
-            "Show the exact Commons edits, then confirm before changing anything.",
+            "Preview the Commons edits, then add them.",
         )
         cases = [
             ("setup needed",
@@ -3335,14 +3336,14 @@ def check_web_review_html():
     }
     text = web_review_html("review.md", [item], ambiguous_count=2)
     for needle in (
-            "Review photos for Category",
+            "Choose photos to add to Category",
             "window.CREDIT_CHECK_ITEMS",
             "window.CREDIT_CHECK_REVIEW_ARG",
             "window.CREDIT_CHECK_AMBIGUOUS_COUNT = 2",
             "window.CREDIT_CHECK_INITIAL_MODE",
             "window.CREDIT_CHECK_GUIDED",
-            "ambiguous ${noun} skipped because",
-            "Photos credited to you, missing this category",
+            "a category before",
+            "Photos you can add to this category",
             "Special:FilePath/Example_photo.jpg?width=420",
             "Select shown",
             "data-mode=\"selected\"",
@@ -4094,7 +4095,7 @@ def interactive_settings():
         "author": author,
         "by_category": by_cat,
     })
-    print("Saved settings to %s." % PREFERENCE_FILE)
+    print("Settings saved.")
 
 def interactive_review(initial_mode="all"):
     review = guided_review_path()
@@ -4140,7 +4141,7 @@ def interactive_menu_actions(state):
     elif state["selected"]:
         primary_value = "add"
         primary_label = "Add selected photos to your category page on Wikimedia Commons"
-        primary_desc = "Show the exact Commons edits, then confirm before changing anything."
+        primary_desc = "Preview the Commons edits, then add them."
     else:
         primary_value = "review"
         primary_label = "Choose photos to add"
@@ -4273,10 +4274,19 @@ def cmd_interactive(args):
 
 # ---------------------------------------------------------------- CLI
 
+try:
+    import importlib.metadata as _metadata
+    __version__ = _metadata.version("credit-check")
+except Exception:
+    __version__ = "1.1.0"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.set_defaults(func=cmd_interactive)
+    ap.add_argument("--version", action="version",
+                    version="credit-check %s" % __version__)
     sub = ap.add_subparsers(dest="cmd")
 
     i = sub.add_parser("interactive", help="start the guided command-line app")

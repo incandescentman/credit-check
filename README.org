@@ -1,5 +1,10 @@
 #+TITLE: Credit Check
-#+SUBTITLE: Find Commons files you photographed that are used on Wikipedia
+
+/Find Commons files you photographed that are used on Wikipedia/
+
+[[https://img.shields.io/badge/License-MIT-2e7d4f.svg]]
+[[https://img.shields.io/badge/Python-3.8%2B-3776ab.svg]]
+[[https://img.shields.io/badge/from-WikiPortraits-0e6b45.svg]]
 
 Credit Check is a free command-line tool from WikiPortraits for Wikimedia
 Commons photographers. It searches Wikipedia to find the articles that feature
@@ -10,14 +15,15 @@ you can easily keep track of which Wikipedia articles use your photos.
 #+ATTR_HTML: :alt Credit Check screenshot showing selected Wikimedia Commons photos, Wikipedia usage, and a photographer category :width 100%
 [[file:assets/credit-check-hero.jpeg]]
 
-That is the main workflow. If you also provide a category for photos of you and
-a Wikidata QID, Credit Check can put photos of you taken by other people in a
-separate review section.
+* Quick start
 
-Run =credit-check= to start the guided command-line app. Credit Check writes a
-plain Markdown review file first, opens a local browser contact sheet so you
-can pick photos visually, and edits Commons only when you confirm =commit
---go=. Photos of you taken by other people are a separate guided action.
+#+begin_src sh
+pipx install credit-check     # or: pip install credit-check
+credit-check                  # start the guided app, then follow the prompts
+#+end_src
+
+That's it. Credit Check walks you through the rest: set up your Commons account
+once, find your photos, pick the ones to add, and add them to your category.
 
 * What it does
 
@@ -27,12 +33,9 @@ can pick photos visually, and edits Commons only when you confirm =commit
 2. *Checks Wikipedia.* Keeps only files used on live Wikipedia articles, across
    every language edition.
 3. *Spots the gaps.* Flags the ones missing =Category:Photographs by <you>=.
-4. *Sorts you from subjects.* Photos you took go one way. Photos that merely
-   depict you (shot by someone else) never land in your "Photographs by"
-   category, and can go to a category for photos of you instead.
-5. *Traces crops.* If a crop dropped your credit but still cites your original
-   file as its source, Credit Check follows the trail and claims it anyway.
-6. *Waits for your yes.* Nothing is edited until you tick a box.
+4. *Traces crops.* If a crop dropped your credit but still cites your original
+   file as its source, Credit Check follows the trail back and includes it too.
+5. *You select* which photos to add to your photographer category.
 
 * Requirements
 
@@ -47,13 +50,20 @@ Check your Python:
 
 * Install
 
-From this checkout, install it as an editable command with pipx:
+Install from PyPI with pipx:
 
-: cd path/to/credit-check
-: pipx install --editable .
+: pipx install credit-check
 
-Now =credit-check= runs from anywhere, and it uses the code in this repo while
-you iterate.
+That's it — =credit-check= now runs from anywhere. (=pip install credit-check=
+works too.)
+
+Prefer to run from source? Clone the repo and install it instead:
+
+: git clone https://github.com/incandescentman/credit-check.git
+: cd credit-check
+: pipx install .
+
+Add =--editable= if you plan to modify the code.
 
 Prefer not to install? Just run the script directly, using =python3 credit_check.py=
 in place of =credit-check= throughout this guide. Direct script mode still
@@ -68,9 +78,9 @@ Start the guided command-line app:
 : credit-check
 
 If this is your first run, it starts with setup: your Commons username, your
-credited name, and your photographer category. After that, it shows the current
-photo status and puts the natural next action first: find your photos, choose
-photos to add, or add the photos you picked. A separate optional action is always
+credited name, and your photographer category. After that, it shows where you're
+up to and offers the obvious next step first: find your photos, choose photos to
+add, or add the photos you picked. A separate optional action is always
 available for photos of you taken by other people; it looks up matching
 Wikidata items by your name when you choose it.
 
@@ -81,9 +91,116 @@ Settings action saves your Commons username, credited name, and photographer
 category in [[file:.credit-check.json][.credit-check.json]] for this folder, so you do not have to
 re-enter them.
 
-* Direct commands
+* Making edits: the bot password
 
-You can also run each step directly.
+Editing needs a login. Don't use your main password. Create a bot password, a
+scoped, revocable credential:
+
+1. Go to https://commons.wikimedia.org/wiki/Special:BotPasswords
+2. Create one (name it something like =categorize=). Grant *Edit existing pages*.
+3. You'll get a username like =Jaydixit@categorize= and a generated password.
+
+Give them to Credit Check by environment variable:
+
+: export COMMONS_BOTUSER='Jaydixit@categorize'
+: export COMMONS_BOTPASS='the-generated-password'
+
+If you skip this, =commit --go= will prompt you for them.
+
+* Finding photos that depict you
+
+Credit Check only files photos you took — a portrait someone else shot won't be
+filed under "Photographs by you." For photos of you taken by other people, choose
+=Find photos of you by other people= in the guided app; Credit Check looks up
+matching Wikidata items so you can pick yourself, or skip cleanly if none of them
+are you. If you use direct
+commands and have a Wikidata item, point the tool at it:
+
+: credit-check scan --of-category 'Jay Dixit' --qid Q12345
+
+Files that Commons structured data says depict you (and that you didn't shoot)
+land in their own section. If you pick them, Credit Check adds them to your
+category for photos of you.
+
+* Good Commons manners
+
+Credit Check is built to be careful on Commons:
+
+- Nothing is edited unless you pick it and confirm. Preview is the default.
+- It appends only. It never rewrites a page, reorders categories, or touches
+  license, author, or description fields.
+- It re-checks every file right before editing, so it won't add a duplicate.
+- It pauses between edits and backs off while fetching or logging in if
+  Commons asks it to slow down.
+- It doesn't automatically resubmit an edit after a lost network response; it
+  reports that file as failed so you can re-run safely after checking the page.
+- Every edit carries a transparent summary naming the category it added.
+
+If you're about to categorize hundreds of files, that's a semi-automated batch.
+Skim the Commons norms for that kind of work, and if you're doing it regularly,
+consider whether a bot flag or a quick note to the community is warranted. For a
+one-time cleanup of your own photos, a normal login is generally fine.
+
+* When something goes wrong
+
+- *"Missing --username (or WIKI_USERNAME)"*: set your identity (see Environment
+  variables and config).
+- *"rate-limited, waiting Ns..."*: normal. Commons throttled you; the tool
+  waits and retries discovery, fetch, and login requests on its own.
+- *"! failed (network)"*: the edit response was lost or failed. The tool did
+  not resubmit the edit automatically, to avoid double-appending a category.
+  Check the file page or re-run the plan before trying again.
+- *"Login failed"*: check your bot password, and that you granted it "Edit
+  existing pages."
+- *A scan feels slow*: it's fetching usage and wikitext for hundreds of
+  files. Let it run; it prints progress as it goes.
+
+* What it won't do
+
+It won't upload files, edit Wikipedia articles, rewrite your metadata, or add
+event or location categories. Its job is narrow on purpose: get your
+Wikipedia-used photos into your photographer category.
+
+* The payoff
+
+When you're done, your work is collected at one URL you can point anyone to:
+
+: https://commons.wikimedia.org/wiki/Category:Photographs_by_Jay_Dixit
+
+If your photo is on Wikipedia and Commons already credits you, Credit Check
+makes sure it shows up in your category.
+
+* About WikiPortraits
+
+WikiPortraits is a global network of volunteer photographers on a mission to
+deliver high-quality, freely licensed portraits to
+[[https://en.wikipedia.org/wiki/Main_Page][Wikipedia]],
+[[https://commons.wikimedia.org/wiki/Main_Page][Wikimedia Commons]], and the
+world.
+
+Wikipedia and its sister Wikimedia projects require freely licensed images, but
+most published photos of notable people are press shots under full copyright, so
+countless biographies are stuck with low-quality photos or none at all.
+WikiPortraits changes that: our volunteer photographers go where notable people
+gather — film festivals, conferences, and award ceremonies — often as
+credentialed press. At many events we also run a photo booth, where anyone with
+a Wikipedia page, speaker or not, can drop by for a portrait. Every shot is
+freely licensed, uploaded to Wikimedia Commons, and free for the world to use.
+
+Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia
+articles in over 150 languages, viewed more than 150 million times a month.
+Among the events our photographers have captured: Sundance Film Festival, SXSW,
+Cannes Film Festival, Edinburgh Festival Fringe, Venice Film Festival, Toronto
+International Film Festival, the Nobel Prizes, CES, and the Pulitzer Prizes.
+
+* Author
+
+Credit Check was built by Jay Dixit ([[mailto:jay@wikiportraits.org][jay@wikiportraits.org]]).
+
+* Reference
+
+The guided =credit-check= app covers everything above. The sections below are
+for scripting and power users who want to run each step by hand.
 
 ** Check the tool
 
@@ -97,7 +214,7 @@ Run a read-only Commons smoke test:
 
 Neither command edits Commons.
 
-** Setup
+** Environment variables and config
 
 Set your identity once. Put this in your shell profile if you like:
 
@@ -146,9 +263,9 @@ What those advanced preferences mean:
   your category.
 - =source_depth= controls crop tracing. A hop is one step from a crop back to
   the file it came from. The default =2= covers an original and a crop-of-a-crop
-  without making the scan wander too far.
+  without following long source chains.
 
-** Workflow
+** Command-line workflow
 
 *** 1. Scan
 
@@ -240,8 +357,8 @@ Two things worth knowing:
 
 - Each =# Add to [Category:...]= heading sets the category for the photos under
   it. Move a photo to a different section and it goes to that category instead.
-- Files under =# Ambiguous= are never edited automatically. To categorize one,
-  move it up under a real heading, then tick it.
+- Files under =# Ambiguous= are skipped until you move them under a real heading
+  and tick them.
 
 *** 3. Plan
 
@@ -263,23 +380,7 @@ between edits. When it finishes, it shows how many photos were added, already
 present, or failed, links to the category page, and tells you whether any
 photos you did not select remain.
 
-* Making edits: the bot password
-
-Editing needs a login. Don't use your main password. Create a bot password, a
-scoped, revocable credential:
-
-1. Go to https://commons.wikimedia.org/wiki/Special:BotPasswords
-2. Create one (name it something like =categorize=). Grant *Edit existing pages*.
-3. You'll get a username like =Jaydixit@categorize= and a generated password.
-
-Give them to Credit Check by environment variable:
-
-: export COMMONS_BOTUSER='Jaydixit@categorize'
-: export COMMONS_BOTPASS='the-generated-password'
-
-If you skip this, =commit --go= will prompt you for them.
-
-* Useful options
+** All options
 
 On =scan=:
 
@@ -315,93 +416,3 @@ Other commands:
 | =review --selected REVIEW= | Opens the browser filtered to photos you selected |
 | =web REVIEW=       | Same browser picker, kept as an explicit alias    |
 | =plan REVIEW=      | Prints planned edits for the photos you checked   |
-
-* Finding photos that depict you
-
-By default Credit Check ignores photos of you: a portrait someone else shot
-won't be filed under "Photographs by you." In the guided app, choose =Find
-photos of you by other people=; Credit Check looks up matching Wikidata items so
-you can pick yourself, or skip cleanly if none of them are you. If you use direct
-commands and have a Wikidata item, point the tool at it:
-
-: credit-check scan --of-category 'Jay Dixit' --qid Q12345
-
-Files that Commons structured data says depict you (and that you didn't shoot)
-land in their own section. If you pick them, Credit Check adds them to your
-category for photos of you.
-
-* Good Commons manners
-
-Credit Check is built to be a considerate editor, and you should run it like
-one:
-
-- Nothing is edited unless you pick it and confirm. Preview is the default.
-- It appends only. It never rewrites a page, reorders categories, or touches
-  license, author, or description fields.
-- It re-checks every file right before editing, so it won't add a duplicate.
-- It pauses between edits and backs off while fetching or logging in if
-  Commons asks it to slow down.
-- It does not blindly retry edit submissions after a lost network response; it
-  reports that file as failed so you can re-run safely after checking the page.
-- Every edit carries a transparent summary naming the category it added.
-
-If you're about to categorize hundreds of files, that's a semi-automated batch.
-Skim the Commons norms for that kind of work, and if you're doing it regularly,
-consider whether a bot flag or a quick note to the community is warranted. For a
-one-time cleanup of your own photos, a normal login is generally fine.
-
-* When something goes wrong
-
-- *"Missing --username (or WIKI_USERNAME)"*: set your identity (see Setup).
-- *"rate-limited, waiting Ns..."*: normal. Commons throttled you; the tool
-  waits and retries discovery, fetch, and login requests on its own.
-- *"! failed (network)"*: the edit response was lost or failed. The tool did
-  not resubmit the edit automatically, to avoid double-appending a category.
-  Check the file page or re-run the plan before trying again.
-- *"Login failed"*: check your bot password, and that you granted it "Edit
-  existing pages."
-- *A scan feels slow*: it's fetching usage and wikitext for hundreds of
-  files. Let it run; it prints progress as it goes.
-
-* What it won't do
-
-It won't upload files, edit Wikipedia articles, rewrite your metadata, add
-event or location categories, or edit anything without your say-so. Its job is
-narrow on purpose: get your Wikipedia-used photos into your photographer
-category.
-
-* The payoff
-
-When you're done, your work is collected at one URL you can point anyone to:
-
-: https://commons.wikimedia.org/wiki/Category:Photographs_by_Jay_Dixit
-
-If your photo is on Wikipedia and Commons already credits you, Credit Check
-makes sure it shows up in your category.
-
-* About WikiPortraits
-
-WikiPortraits is a global network of volunteer photographers on a mission to
-deliver high-quality, freely licensed portraits to
-[[https://en.wikipedia.org/wiki/Main_Page][Wikipedia]],
-[[https://commons.wikimedia.org/wiki/Main_Page][Wikimedia Commons]], and the
-world.
-
-Wikipedia and its sister Wikimedia projects require freely licensed images, but
-most published photos of notable people are press shots under full copyright, so
-countless biographies are stuck with low-quality photos or none at all.
-WikiPortraits changes that: our volunteer photographers go where notable people
-gather — film festivals, conferences, and award ceremonies — often as
-credentialed press. At many events we also run a photo booth, where anyone with
-a Wikipedia page, speaker or not, can drop by for a portrait. Every shot is
-freely licensed, uploaded to Wikimedia Commons, and free for the world to use.
-
-Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia
-articles in over 150 languages, viewed more than 150 million times a month.
-Among the events our photographers have captured: Sundance Film Festival, SXSW,
-Cannes Film Festival, Edinburgh Festival Fringe, Venice Film Festival, Toronto
-International Film Festival, the Nobel Prizes, CES, and the Pulitzer Prizes.
-
-* Author
-
-Credit Check was built by Jay Dixit ([[mailto:jay@wikiportraits.org][jay@wikiportraits.org]]).
