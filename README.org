@@ -106,10 +106,11 @@ Wikidata items by your name when you choose it.
 
 In guided mode, Credit Check keeps track of the found photos automatically.
 After a scan, it opens the browser photo picker instead of asking you which file
-to use. The
-Settings action saves your Commons username, credited name, and photographer
-category in [[file:.credit-check.json][.credit-check.json]] for this folder, so you do not have to
-re-enter them.
+to use. The Settings action saves your Commons username, credited name, and
+photographer category in [[file:.credit-check.json][.credit-check.json]] for this folder, so you do
+not have to re-enter them. To use the same folder for someone else, choose
+=Start over with a different photographer=; it clears saved details and current
+found photos, then asks for the new photographer and searches again.
 
 * Making edits: the bot password
 

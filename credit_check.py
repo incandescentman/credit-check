@@ -413,6 +413,9 @@ def langs_line(wp):
 
 REVIEW_FORMAT_ENV = "CREDIT_CHECK_REVIEW_FORMAT"
 PREFERENCE_FILE = ".credit-check.json"
+PHOTOGRAPHER_PREF_KEYS = (
+    "username", "author", "by_category", "of_category", "qid",
+)
 REVIEW_FORMAT_ALIASES = {"md": "markdown", "markdown": "markdown",
                          "org": "org", "org-mode": "org", "orgmode": "org"}
 
@@ -491,6 +494,37 @@ def save_local_preferences(updates):
         else:
             prefs[key] = value
     atomic_write_text(PREFERENCE_FILE, json.dumps(prefs, indent=2, sort_keys=True) + "\n")
+
+def clear_photographer_preferences():
+    save_local_preferences({key: None for key in PHOTOGRAPHER_PREF_KEYS})
+
+def reset_review_paths():
+    prefs = local_preferences()
+    candidates = []
+    for key in ("review_path", "out"):
+        path = prefs.get(key)
+        if path:
+            candidates.append(path)
+    candidates += ["review.md", "review.org"]
+    paths = []
+    seen = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+def clear_review_files():
+    removed = []
+    for path in reset_review_paths():
+        if not (os.path.exists(path) or os.path.islink(path)):
+            continue
+        if os.path.isdir(path) and not os.path.islink(path):
+            continue
+        os.unlink(path)
+        removed.append(path)
+    return removed
 
 def identity_default(pref_name, env_name, default=None):
     return os.environ.get(env_name) or preference_value(pref_name, default=default)
@@ -2672,7 +2706,7 @@ def check_guided_review_state():
 
 def check_guided_menu_dispatch():
     for value in ("self_test", "smoke", "scan_by", "scan_of", "review",
-                  "settings", "add", "quit"):
+                  "settings", "start_over", "add", "quit"):
         check_equal("guided dispatch %s" % value,
                     interactive_choice_action(value), value)
     for value in ("q", "quit", "exit"):
@@ -2707,6 +2741,8 @@ def check_guided_menu_visibility():
             labels = {value: label for label, value, _desc in actions}
             check_equal("photos-of-you guided label", labels.get("scan_of"),
                         "Find photos *of* you")
+            check_equal("start-over guided label", labels.get("start_over"),
+                        "Start over with a different photographer")
 
             zero = {"setup_complete": True, "exists": True, "total": 0,
                     "selected": 0, "ambiguous": 0, "review": "review.md"}
@@ -2753,6 +2789,11 @@ def check_guided_menu_copy_matrix():
             "settings",
             "Save your name, Commons account, and category for photos you took.",
         )
+        start_over = (
+            "Start over with a different photographer",
+            "start_over",
+            "Clear saved details and search for a new set of photos.",
+        )
         setup = (
             "Set up Credit Check",
             "settings",
@@ -2791,23 +2832,23 @@ def check_guided_menu_copy_matrix():
             ("ready to scan",
              {"setup_complete": True, "exists": False, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [find, settings, photos_of_you, quit_action]),
+             [find, settings, start_over, photos_of_you, quit_action]),
             ("caught up",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [caught_up_scan, settings, photos_of_you, quit_action]),
+             [caught_up_scan, settings, start_over, photos_of_you, quit_action]),
             ("choose photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 1, "review": "review.md"},
-             [choose, scan_again, settings, photos_of_you, quit_action]),
+             [choose, scan_again, settings, start_over, photos_of_you, quit_action]),
             ("selected photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 1, "ambiguous": 0, "review": "review.md"},
-             [add, scan_again, choose, settings, photos_of_you, quit_action]),
+             [add, scan_again, choose, settings, start_over, photos_of_you, quit_action]),
             ("setup incomplete with photos",
              {"setup_complete": False, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [setup, scan_again, choose, photos_of_you, quit_action]),
+             [setup, scan_again, choose, start_over, photos_of_you, quit_action]),
         ]
         for name, state, expected in cases:
             check_equal("guided menu copy matrix %s" % name,
@@ -2996,6 +3037,118 @@ def check_interactive_settings_core_only():
     finally:
         sys.stdout = old_stdout
         globals()["prompt_text"] = old_prompt
+        os.chdir(old_cwd)
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
+def check_interactive_start_over():
+    old_cwd = os.getcwd()
+    old_env = {key: os.environ.pop(key, None) for key in (
+        "WIKI_USERNAME", "WIKI_AUTHOR", "WIKI_BY_CATEGORY", "WIKI_OF_CATEGORY",
+        "WIKI_QID")}
+    old_prompt = globals()["prompt_text"]
+    old_confirm = globals()["prompt_yes_no"]
+    old_cmd_scan = globals()["cmd_scan"]
+    old_stdout = sys.stdout
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            os.environ["WIKI_USERNAME"] = "EnvUser"
+            os.environ["WIKI_AUTHOR"] = "Env Author"
+            os.environ["WIKI_BY_CATEGORY"] = "Env Category"
+            save_local_preferences({
+                "username": "OldUser",
+                "author": "Old Author",
+                "by_category": "Old Category",
+                "of_category": "Old Subject",
+                "qid": "Q999",
+                "review_path": "custom-review.md",
+                "review_page_size": 12,
+            })
+            for path in ("custom-review.md", "review.md", "review.org"):
+                atomic_write_text(path, "old review\n")
+            prompts = []
+            confirmations = []
+            scan_calls = []
+            answers = {
+                "Commons username": "NewUser",
+                "Your name as it's credited on Commons": "New Author",
+                "Commons category for photos you took": "Photographs by New Author",
+            }
+
+            def fake_confirm(label, default=False):
+                confirmations.append((label, default))
+                return True
+
+            def fake_prompt(label, default=None, required=False):
+                prompts.append((label, default, required))
+                return answers[label]
+
+            globals()["prompt_yes_no"] = fake_confirm
+            globals()["prompt_text"] = fake_prompt
+            globals()["cmd_scan"] = lambda args: scan_calls.append(args)
+            sys.stdout = io.StringIO()
+            interactive_start_over()
+            output = sys.stdout.getvalue()
+            prefs = local_preferences()
+            check_equal("start-over confirmation default", confirmations, [(
+                "Start over with a different photographer? This clears saved details "
+                "and current found photos.",
+                False,
+            )])
+            check_equal("start-over prompts", [p[0] for p in prompts], [
+                "Commons username",
+                "Your name as it's credited on Commons",
+                "Commons category for photos you took",
+            ])
+            check_equal("start-over saved username", prefs.get("username"), "NewUser")
+            check_equal("start-over saved author", prefs.get("author"), "New Author")
+            check_equal("start-over saved by category", prefs.get("by_category"),
+                        "Photographs by New Author")
+            check_equal("start-over cleared of-category", "of_category" in prefs, False)
+            check_equal("start-over cleared qid", "qid" in prefs, False)
+            check_equal("start-over preserved review path",
+                        prefs.get("review_path"), "custom-review.md")
+            check_equal("start-over preserved page size",
+                        prefs.get("review_page_size"), 12)
+            for path in ("custom-review.md", "review.md", "review.org"):
+                check_equal("start-over removed %s" % path, os.path.exists(path), False)
+            check_equal("start-over scan calls", len(scan_calls), 1)
+            args = scan_calls[0]
+            check_equal("start-over scan username", args.username, "NewUser")
+            check_equal("start-over scan author", args.author, "New Author")
+            check_equal("start-over scan category", args.by_category,
+                        "Photographs by New Author")
+            if "Cleared saved details and current found photos." not in output:
+                raise AssertionError("missing start-over cleared message")
+
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+            save_local_preferences({"username": "OldUser", "author": "Old Author"})
+            atomic_write_text("review.md", "old review\n")
+            globals()["prompt_yes_no"] = lambda label, default=False: False
+
+            def should_not_prompt(*args, **kwargs):
+                raise AssertionError("cancelled start-over prompted for new details")
+
+            globals()["prompt_text"] = should_not_prompt
+            globals()["cmd_scan"] = lambda args: (_ for _ in ()).throw(
+                AssertionError("cancelled start-over scanned"))
+            sys.stdout = io.StringIO()
+            interactive_start_over()
+            prefs = local_preferences()
+            check_equal("cancelled start-over kept username",
+                        prefs.get("username"), "OldUser")
+            check_equal("cancelled start-over kept review",
+                        open("review.md", encoding="utf-8").read(), "old review\n")
+    finally:
+        sys.stdout = old_stdout
+        globals()["prompt_text"] = old_prompt
+        globals()["prompt_yes_no"] = old_confirm
+        globals()["cmd_scan"] = old_cmd_scan
         os.chdir(old_cwd)
         for key, value in old_env.items():
             if value is not None:
@@ -3697,6 +3850,7 @@ def cmd_self_test(args):
     run_check("guided menu copy matrix", check_guided_menu_copy_matrix, failures)
     run_check("guided copy messages", check_guided_copy_messages, failures)
     run_check("interactive settings core fields", check_interactive_settings_core_only, failures)
+    run_check("interactive start-over reset", check_interactive_start_over, failures)
     run_check("interactive by-scan identity prompts", check_interactive_by_scan_identity_prompts, failures)
     run_check("Wikidata candidate parsing", check_wikidata_candidate_parser, failures)
     run_check("interactive Wikidata lookup paths", check_interactive_wikidata_lookup_paths, failures)
@@ -4059,6 +4213,9 @@ def interactive_scan(scan_mode="by"):
         }
     save_local_preferences(updates)
 
+    run_guided_scan(username, author, by_cat, of_cat, qid, scan_mode)
+
+def run_guided_scan(username, author, by_cat, of_cat=None, qid=None, scan_mode="by"):
     review_format = infer_review_format(argparse.Namespace(review_format=None, out=None))
     out = preferred_review_path(review_format)
     min_uses = preference_int("min_uses", "minimum_wikipedia_uses", default=1)
@@ -4076,7 +4233,7 @@ def interactive_scan(scan_mode="by"):
     if sys.stdin.isatty():
         open_review_from_guided_flow(out)
 
-def interactive_settings():
+def prompt_photographer_settings():
     username = prompt_text(
         "Commons username",
         identity_default("username", "WIKI_USERNAME"),
@@ -4090,12 +4247,38 @@ def interactive_settings():
         identity_default("by_category", "WIKI_BY_CATEGORY",
                          "Photographs by %s" % author),
         required=True)
-    save_local_preferences({
+    return {
         "username": username,
         "author": author,
         "by_category": by_cat,
-    })
+    }
+
+def interactive_settings():
+    settings = prompt_photographer_settings()
+    save_local_preferences(settings)
     print("Settings saved.")
+
+def interactive_start_over():
+    if not prompt_yes_no(
+            "Start over with a different photographer? This clears saved details "
+            "and current found photos.",
+            False):
+        print("Keeping the current photographer.")
+        return
+    clear_photographer_preferences()
+    removed = clear_review_files()
+    settings = prompt_photographer_settings()
+    save_local_preferences({
+        "username": settings["username"],
+        "author": settings["author"],
+        "by_category": settings["by_category"],
+    })
+    if removed:
+        print("Cleared saved details and current found photos.")
+    else:
+        print("Cleared saved details.")
+    run_guided_scan(settings["username"], settings["author"],
+                    settings["by_category"], scan_mode="by")
 
 def interactive_review(initial_mode="all"):
     review = guided_review_path()
@@ -4173,6 +4356,12 @@ def interactive_menu_actions(state):
             "settings",
             "Save your name, Commons account, and category for photos you took.",
         ))
+    if state["setup_complete"] or state["exists"]:
+        actions.append((
+            "Start over with a different photographer",
+            "start_over",
+            "Clear saved details and search for a new set of photos.",
+        ))
     actions.append((
         "Find photos *of* you",
         "scan_of",
@@ -4231,7 +4420,7 @@ def interactive_menu_choice():
 
 def interactive_choice_action(choice):
     if choice in ("self_test", "smoke", "scan_by", "scan_of", "review",
-                  "settings", "add", "quit"):
+                  "settings", "start_over", "add", "quit"):
         return choice
     if str(choice).lower() in ("q", "quit", "exit"):
         return "quit"
@@ -4264,6 +4453,8 @@ def cmd_interactive(args):
             interactive_review()
         elif action == "settings":
             interactive_settings()
+        elif action == "start_over":
+            interactive_start_over()
         elif action == "add":
             interactive_preview_and_commit()
         elif action == "quit":
