@@ -2162,14 +2162,14 @@ def review_file_with_pages(review, items, approvable):
         start, end = page_bounds(page_items)
         path = open_review_gallery(page_items, "Credit Check photos %d-%d" %
                                    (start, end), quiet=True)
-        set_message("Opened page contact sheet: %s" % path)
+        set_message("Opened read-only page gallery: %s" % path)
         invalidate(event)
 
     @kb.add("v")
     def _(event):
         path = open_review_gallery(approvable, "Credit Check review - all photos",
                                    quiet=True)
-        set_message("Opened full contact sheet: %s" % path)
+        set_message("Opened read-only full gallery: %s" % path)
         invalidate(event)
 
     @kb.add("s")

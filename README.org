@@ -7,9 +7,8 @@ your photos, then adds those photos (or a subset you pick) to a category page on
 Wikimedia Commons — using a category name like =Photographs by Jay Dixit= — so
 you can easily keep track of which Wikipedia articles use your photos.
 
-<p align="center">
-  <img src="assets/credit-check-hero.jpeg" alt="Credit Check screenshot showing selected Wikimedia Commons photos, Wikipedia usage, and a photographer category" width="100%">
-</p>
+#+ATTR_HTML: :alt Credit Check screenshot showing selected Wikimedia Commons photos, Wikipedia usage, and a photographer category :width 100%
+[[file:assets/credit-check-hero.jpeg]]
 
 That is the main workflow. If you also provide a category for photos of you and
 a Wikidata QID, Credit Check can put photos of you taken by other people in a
@@ -214,8 +213,8 @@ at the top of the screen:
 - =m= selects the current page; =c= clears the current page.
 - =a= selects all photos; =u= clears all photos.
 - =o= opens the highlighted photo on Commons.
-- =g= opens the current page as a browser contact sheet.
-- =v= opens the full review as a browser contact sheet.
+- =g= opens the current page as a read-only browser gallery.
+- =v= opens the full review as a read-only browser gallery.
 - =s= saves your choices; =q= quits without saving.
 
 Both review modes edit the same plain Markdown file, so you can still inspect
