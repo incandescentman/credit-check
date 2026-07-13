@@ -4,7 +4,9 @@
 
 [[https://img.shields.io/badge/License-MIT-2e7d4f.svg]] [[https://img.shields.io/badge/Python-3.8%2B-3776ab.svg]] [[https://img.shields.io/badge/from-WikiPortraits-0e6b45.svg]]
 
-Credit Check is a free tool from WikiPortraits for Wikimedia Commons photographers. It searches Wikipedia to find the articles that feature your photos, then adds those photos (or a subset) to your category page on Wikimedia Commons — using a category name like =Photographs by Jay Dixit= — enabling you to easily keep track of which Wikipedia articles use your photos.
+Credit Check gives you a way to see where all your photos are being used on Wikipedia.
+
+Credit Check is a free tool from WikiPortraits for Wikimedia Commons photographers. It searches Wikipedia articles across all languages, finds which Wikipedia articles use your photos, and gives you a way to collect all your photos on a special "photographer category" page on Wikimedia Commons — something like =Photographs by Jay Dixit= — so you can see them all in one place.
 
 #+ATTR_HTML: :alt Credit Check screenshot showing selected Wikimedia Commons photos, Wikipedia usage, and a photographer category :width 100%
 [[file:assets/credit-check-hero.jpeg]]
@@ -132,7 +134,7 @@ Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia 
 
 * Author
 
-Credit Check was built by [[https://jaydixit.com/][Jay Dixit]] ([[mailto:jay@wikiportraits.org][jay@wikiportraits.org]]).
+Credit Check was built by [[https://jaydixit.com/][Jay Dixit]] ([[mailto:jay@socraticai.co][jay@socraticai.co]]).
 
 * Reference
 
@@ -220,7 +222,7 @@ Open the local browser picker:
 
 : credit-check review review.md
 
-It opens a contact sheet at =127.0.0.1= with Wikimedia Commons thumbnails, category sections, search, review modes (=All=, =Selected=, and =Not selected yet=), select-shown/select-all buttons, and links that open each file on Wikimedia Commons. Selected photos get a visible badge and left stripe so you can scan the page quickly. The =Commons edits= panel updates automatically with the exact category edits for the photos you picked. The page saves your choices automatically. Use =Done= when you are finished.
+It opens a =Credit Check= photo picker at =127.0.0.1= with Wikimedia Commons thumbnails, category sections, search, review modes (=All=, =Selected=, and =Not selected yet=), and select-shown/select-all buttons. A large =Credit Check= product title anchors the upper-left while the larger endorsement =A free tool from WikiPortraits= and official WikiPortraits logo balance the upper-right; the linked wordmark and logo open [[https://www.wikiportraits.org/][wikiportraits.org]]. On mobile, the endorsement stacks beneath the title. Deliberate whitespace separates that product lockup from the smaller task heading beneath it, =Photos credited to you=. On desktop, three large editorial cards fill each row. Each card presents the photo's English Wikimedia Commons caption as a large three-line Instrument Sans title above a full-bleed 4:5 thumbnail, falling back first to a useful English description and then, for the few photos without either, a cleaned filename. The thumbnail uses a top-biased crop to preserve portrait headroom and fine green crop marks to give the gallery an editorial contact-sheet character; opening it shows the uncropped original on Wikimedia Commons. Under =Your photo appears in=, the card then shows up to five English Wikipedia article titles. When there are more, =+ N more · View all M English-language Wikipedia articles= identifies the hidden remainder and opens the complete English list in one wide view, where the full metadata caption is repeated. Pages in other Wikipedia languages expand separately and are grouped by language. If a photo has no English use, the card shows its first available article and names that Wikipedia language. Expand =Photo details= for the original filename and Wikimedia Commons link. Selected photos get a circular green check and ring. The right rail shows your selected-photo count, target category, exact Wikimedia Commons edits, save status, and =Done=. When the review has one target category, the entire green category card opens that real category page on Wikimedia Commons in a new tab. The page saves your choices automatically.
 
 Browser shortcuts:
 
@@ -258,7 +260,7 @@ Both review modes edit the same plain Markdown file, so you can still inspect or
 : ## [148] Jessie Buckley ... (Cropped & Centered).jpg
 :
 : - [ ] File:Jessie Buckley ... (Cropped & Centered).jpg
-:   [open on Commons](https://commons.wikimedia.org/...) - uploader Indopug - credited
+:   [open on Wikimedia Commons](https://commons.wikimedia.org/...) - uploader Indopug - credited
 :   cats: Jessie Buckley, WikiPortraits at 2025 TIFF
 :   live: en, af, ar, az, bg, bn, ca, da, +29
 

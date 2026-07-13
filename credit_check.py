@@ -20,7 +20,7 @@ WORKFLOW
     4. commit   -> logs in and adds the right category to each photo you checked
 
 CONFIG (flags override environment and local preferences)
-    --username     / WIKI_USERNAME      your Commons account (the uploader name)
+    --username     / WIKI_USERNAME      your Wikimedia Commons account (the uploader name)
     --author       / WIKI_AUTHOR        your name as it appears in author fields
     --by-category  / WIKI_BY_CATEGORY   default: "Photographs by <author>"
     --of-category  / WIKI_OF_CATEGORY   category for photos of you
@@ -40,7 +40,7 @@ EXAMPLES
 
 CREDENTIALS (commit --go only)
     Make a bot password at https://commons.wikimedia.org/wiki/Special:BotPasswords
-    with "Edit existing pages". This is an app password for your own Commons
+    with "Edit existing pages". This is an app password for your own Wikimedia Commons
     account, not a separate uploader. A login like Jaydixit@categorize still
     edits as Jaydixit. If credentials are missing, Credit Check explains the
     steps and prompts for the generated username and password. Direct-command
@@ -73,12 +73,35 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-UA = "credit-check/2.0 (Commons photographer self-categorization; run by file owner)"
+__version__ = "1.1.7"
+UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
+      "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
 WEB_REVIEW_HOST = "127.0.0.1"
+SAFE_API_RETRY_CODES = frozenset(("maxlag", "ratelimited", "readonly"))
 
 
 # ---------------------------------------------------------------- HTTP client
+
+class MediaWikiAPIError(Exception):
+    def __init__(self, error, response=None):
+        self.error = error or {}
+        self.response = response or {}
+        self.code = self.error.get("code") or "unknown"
+        self.info = self.error.get("info") or "MediaWiki API error"
+        super().__init__("%s: %s" % (self.code, self.info))
+
+
+def api_retry_wait(error, attempt):
+    values = [error.get("retry-after"), error.get("wait")]
+    if error.get("code") == "maxlag":
+        values.append(error.get("lag"))
+    for value in values:
+        try:
+            return max(1, int(float(value)))
+        except (TypeError, ValueError):
+            pass
+    return 2 ** attempt
 
 class Client:
     def __init__(self, api=API):
@@ -88,15 +111,29 @@ class Client:
             urllib.request.HTTPCookieProcessor(self.jar))
         self.opener.addheaders = [("User-Agent", UA)]
 
-    def _call(self, params, data=None, tries=6, retry_post=False):
+    def _call(self, params, data=None, tries=6, retry_post=False,
+              retry_api_errors=None):
         params = {**params, "format": "json"}
         url = self.api + "?" + urllib.parse.urlencode(params)
         body = urllib.parse.urlencode(data).encode() if data else None
         may_retry = (body is None) or retry_post
+        retry_api_errors = frozenset(
+            SAFE_API_RETRY_CODES if retry_api_errors is None and may_retry
+            else (retry_api_errors or ()))
         for attempt in range(tries):
             try:
                 with self.opener.open(url, data=body, timeout=60) as r:
-                    return json.load(r)
+                    result = json.load(r)
+                error = result.get("error")
+                if error:
+                    code = error.get("code")
+                    if code in retry_api_errors and attempt < tries - 1:
+                        wait = api_retry_wait(error, attempt)
+                        print("  %s, waiting %ss..." % (code, wait), file=sys.stderr)
+                        time.sleep(wait)
+                        continue
+                    raise MediaWikiAPIError(error, result)
+                return result
             except urllib.error.HTTPError as e:
                 if may_retry and e.code in (429, 503) and attempt < tries - 1:
                     wait = int(e.headers.get("Retry-After") or 0) or 2 ** attempt
@@ -109,8 +146,9 @@ class Client:
                 raise
 
     def get(self, params):          return self._call(params)
-    def post(self, params, data, retry_post=False):
-        return self._call(params, data=data, retry_post=retry_post)
+    def post(self, params, data, retry_post=False, retry_api_errors=None):
+        return self._call(params, data=data, retry_post=retry_post,
+                          retry_api_errors=retry_api_errors)
 
 
 # ---------------------------------------------------------------- Wikidata lookup
@@ -189,8 +227,55 @@ def discover_titles(cl, username, author, insource_user):
     return reasons
 
 
+def clean_commons_description(value):
+    if isinstance(value, dict):
+        value = value.get("en") or next(
+            (candidate for language, candidate in value.items()
+             if language != "_type"), "")
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"<[^>]+>", " ", value)
+    text = html.unescape(text).replace("\u200b", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def useful_commons_description(value):
+    text = clean_commons_description(value)
+    if not text:
+        return ""
+    boilerplate = (
+        r"^(?:(?:this|this image)\s+is\s+)?(?:a\s+)?cropped\s+version\s+of\s+file:",
+        r"^(?:a\s+)?crop\s+(?:of|from)\s+file:",
+    )
+    if any(re.match(pattern, text, re.I) for pattern in boilerplate):
+        return ""
+    return text
+
+
+def fetch_english_captions(cl, pageids):
+    """Return Commons MediaInfo English captions keyed by numeric file page ID."""
+    captions = {}
+    ids = ["M%d" % pageid for pageid in pageids if pageid]
+    for i in range(0, len(ids), TITLE_BATCH):
+        batch = ids[i:i + TITLE_BATCH]
+        data = cl.get({
+            "action": "wbgetentities",
+            "ids": "|".join(batch),
+            "props": "labels",
+            "languages": "en",
+        })
+        for entity_id, entity in data.get("entities", {}).items():
+            if not re.fullmatch(r"M\d+", entity_id):
+                continue
+            value = ((entity.get("labels") or {}).get("en") or {}).get("value")
+            if value and value.strip():
+                captions[int(entity_id[1:])] = re.sub(r"\s+", " ", value).strip()
+        time.sleep(0.4)
+    return captions
+
+
 def fetch_details(cl, titles, by_cat, of_cat):
-    """Per title: pageid, uploader, cats, in_by_cat, in_of_cat, wp uses, wikitext."""
+    """Per title: file metadata, categories, Wikipedia uses, and wikitext."""
     by_full = "Category:" + by_cat
     of_full = "Category:" + of_cat if of_cat else None
     info = {}
@@ -199,7 +284,11 @@ def fetch_details(cl, titles, by_cat, of_cat):
         batch = titles[i:i + TITLE_BATCH]
         base = {"action": "query", "titles": "|".join(batch),
                 "prop": "categories|globalusage|imageinfo|revisions",
-                "cllimit": "500", "clshow": "!hidden", "iiprop": "user",
+                "cllimit": "500", "clshow": "!hidden",
+                "iiprop": "user|extmetadata",
+                "iiextmetadatafilter": "ImageDescription",
+                "iiextmetadatalanguage": "en",
+                "iiextmetadatamultilang": "0",
                 "rvprop": "content", "rvslots": "main",
                 "guprop": "url|namespace", "gufilterlocal": "1", "gulimit": "500"}
         cont = {}
@@ -209,9 +298,14 @@ def fetch_details(cl, titles, by_cat, of_cat):
                 t = p["title"]
                 rec = info.setdefault(t, {"pageid": p.get("pageid"), "uploader": None,
                                           "cats": set(), "in_by": False, "in_of": False,
-                                          "wp": {}, "text": ""})
+                                          "wp": {}, "text": "", "description": "",
+                                          "caption": ""})
                 ii = (p.get("imageinfo") or [{}])[0]
                 if ii.get("user"): rec["uploader"] = ii["user"]
+                extmetadata = ii.get("extmetadata") or {}
+                description = (extmetadata.get("ImageDescription") or {}).get("value")
+                if description:
+                    rec["description"] = useful_commons_description(description)
                 rev = (p.get("revisions") or [{}])[0]
                 content = (rev.get("slots", {}).get("main", {}) or {}).get("*", "")
                 if content: rec["text"] = content
@@ -412,6 +506,42 @@ def langs_line(wp):
     if len(order) > 8: head += ", +%d" % (len(order) - 8)
     return head
 
+def sorted_wikipedia_uses(wp):
+    return sorted(wp.values(), key=lambda use: (
+        use.get("lang") != "en",
+        use.get("lang") or "",
+        wikipedia_article_title(use),
+    ))
+
+def wikipedia_article_title(use):
+    # MediaWiki commonly returns database-form titles with underscores. Keep
+    # those in URLs, but present the article name the way Wikipedia does.
+    return (use.get("title") or "Untitled article").replace("_", " ")
+
+def wikipedia_article_url(use):
+    wiki = use.get("wiki") or ""
+    title = use.get("title") or ""
+    return "https://%s/wiki/%s" % (
+        wiki,
+        urllib.parse.quote(title.replace(" ", "_"), safe="/:,-"),
+    )
+
+def review_link_label(value):
+    return str(value).replace("\\", "\\\\").replace("]", "\\]")
+
+def unescape_review_link_label(value):
+    return re.sub(r"\\(.)", r"\1", value)
+
+def markdown_use_line(use):
+    return "  used in: [%s](%s)" % (
+        review_link_label(wikipedia_article_title(use)),
+        wikipedia_article_url(use),
+    )
+
+def org_use_line(use):
+    label = wikipedia_article_title(use).replace("]", "\\]")
+    return "     used in: [[%s][%s]]" % (wikipedia_article_url(use), label)
+
 REVIEW_FORMAT_ENV = "CREDIT_CHECK_REVIEW_FORMAT"
 PREFERENCE_FILE = ".credit-check.json"
 PHOTOGRAPHER_PREF_KEYS = (
@@ -587,11 +717,14 @@ def markdown_item_block(title, rec):
         "## [%d] %s" % (len(rec["wp"]), name),
         "",
         "- [ ] %s" % title,
-        "  [open on Commons](%s) - uploader %s - %s"
+        "  [open on Wikimedia Commons](%s) - uploader %s - %s"
         % (url, rec["uploader"] or "?", "/".join(sorted(rec["reason"]))),
         "  cats: %s" % cats,
         "  live: %s" % langs_line(rec["wp"]),
     ]
+    if rec.get("caption"):
+        block.append("  caption: %s" % rec["caption"])
+    block.extend(markdown_use_line(use) for use in sorted_wikipedia_uses(rec["wp"]))
     if rec.get("derived_from"):
         block.append("  derived from: %s (credited to you)" % rec["derived_from"])
     block.append("")
@@ -604,11 +737,14 @@ def org_item_block(title, rec):
     block = [
         "** [%d] %s" % (len(rec["wp"]), name),
         "   - [ ] %s" % title,
-        "     [[%s][open on Commons]] · uploader %s · %s"
+        "     [[%s][open on Wikimedia Commons]] · uploader %s · %s"
         % (url, rec["uploader"] or "?", "/".join(sorted(rec["reason"]))),
         "     cats: %s" % cats,
         "     live: %s" % langs_line(rec["wp"]),
     ]
+    if rec.get("caption"):
+        block.append("     caption: %s" % rec["caption"])
+    block.extend(org_use_line(use) for use in sorted_wikipedia_uses(rec["wp"]))
     if rec.get("derived_from"):
         block.append("     derived from: %s (credited to you)" % rec["derived_from"])
     block.append("")
@@ -705,6 +841,16 @@ MD_SECTION_RE = re.compile(r"^#\s+")
 CHECK_RE = re.compile(r"^\s*-\s*\[(.)\]\s*(File:.+?)\s*$")
 CHECK_LINE_RE = re.compile(r"^(\s*-\s*)\[(.)\](\s*File:.+?)(\n?)$")
 ITEM_HEAD_RE = re.compile(r"^\s*(?:##|\*\*)\s+\[(\d+)\]\s+(.+?)\s*$")
+MD_USE_RE = re.compile(r"^\s+used in:\s+\[((?:\\.|[^]])*)\]\((https?://\S+)\)\s*$")
+ORG_USE_RE = re.compile(r"^\s+used in:\s+\[\[(https?://[^]]+)\]\[((?:\\.|[^]])*)\]\]\s*$")
+CAPTION_RE = re.compile(r"^\s+caption:\s*(.*?)\s*$", re.I)
+
+def article_from_review_link(url, label):
+    parsed = urllib.parse.urlparse(url)
+    wiki = parsed.netloc
+    title = unescape_review_link_label(label)
+    lang = wiki.split(".", 1)[0] if wiki.endswith(".wikipedia.org") else ""
+    return {"wiki": wiki, "lang": lang, "title": title, "url": url}
 
 def parse_approved(path, warn=True):
     """Return list of (file_title, target_category) for ticked items under a target heading.
@@ -734,6 +880,7 @@ def parse_review_items(path):
     """Return review checkbox items with line numbers and their active target category."""
     items, target = [], None
     item_label, item_uses = None, None
+    current_item = None
     ext = os.path.splitext(path)[1].lower()
     allow_org = ext not in (".md", ".markdown")
     allow_md = ext != ".org"
@@ -744,6 +891,24 @@ def parse_review_items(path):
         if mh:
             item_uses = int(mh.group(1))
             item_label = mh.group(2).strip()
+            current_item = None
+            continue
+
+        mu = MD_USE_RE.match(line) if allow_md else None
+        if not mu and allow_org:
+            mu = ORG_USE_RE.match(line)
+            if mu and current_item is not None:
+                current_item["articles"].append(
+                    article_from_review_link(mu.group(1), mu.group(2)))
+                continue
+        elif mu and current_item is not None:
+            current_item["articles"].append(
+                article_from_review_link(mu.group(2), mu.group(1)))
+            continue
+
+        caption_match = CAPTION_RE.match(line)
+        if caption_match and current_item is not None:
+            current_item["caption"] = caption_match.group(1).strip()
             continue
 
         mt = None
@@ -754,23 +919,28 @@ def parse_review_items(path):
         if mt:
             target = mt.group(1)
             item_label, item_uses = None, None
+            current_item = None
             continue
         if (allow_org and ORG_SECTION_RE.match(line)) or (allow_md and MD_SECTION_RE.match(line)):
             target = None
             item_label, item_uses = None, None
+            current_item = None
             continue
 
         mc = CHECK_RE.match(line)
         if mc:
             title = mc.group(2)
-            items.append({
+            current_item = {
                 "line": i,
                 "title": title,
                 "target": target,
                 "checked": mc.group(1).strip().lower() == "x",
                 "uses": item_uses,
                 "label": item_label or (title[5:] if title.startswith("File:") else title),
-            })
+                "articles": [],
+                "caption": "",
+            }
+            items.append(current_item)
             item_label, item_uses = None, None
     return items
 
@@ -865,7 +1035,7 @@ def review_gallery_html(items, heading):
   <h2>{label}</h2>
   <p>{uses} · {checked}</p>
   <p>{target}</p>
-  <a href="{file_url}" target="_blank" rel="noreferrer">Open on Commons</a>
+  <a href="{file_url}" target="_blank" rel="noreferrer">Open on Wikimedia Commons</a>
 </article>""".format(
             file_url=html.escape(commons_file_url(title), quote=True),
             thumb_url=html.escape(commons_thumb_url(title), quote=True),
@@ -922,6 +1092,8 @@ def web_review_payload(items):
             "target": item["target"],
             "checked": item["checked"],
             "uses": item["uses"],
+            "articles": item.get("articles", []),
+            "caption": item.get("caption", ""),
             "file_url": commons_file_url(item["title"]),
             "thumb_url": commons_thumb_url(item["title"], width=420),
         })
@@ -931,7 +1103,10 @@ class ReviewChangedError(Exception):
     pass
 
 def review_items_signature(items):
-    return [(item["line"], item["title"], item["target"], item["checked"])
+    return [(item["line"], item["title"], item["target"], item["checked"],
+             item.get("caption", ""),
+             tuple((article.get("title"), article.get("url"))
+                   for article in item.get("articles", [])))
             for item in items]
 
 def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
@@ -952,7 +1127,10 @@ def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Credit Check review</title>
+<title>Credit Check — Photos credited to you</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..800&amp;display=swap">
 <style>
 :root {
   color-scheme: light;
@@ -977,7 +1155,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 15px/1.45 "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 header {
   position: sticky;
@@ -1404,54 +1582,1004 @@ a {
     text-align: left;
   }
 }
+
+/* Warm, task-first picker direction from the approved Credit Check mockup. */
+:root {
+  --bg: #f1f1ed;
+  --panel: #ffffff;
+  --panel-soft: #f7f7f3;
+  --ink: #15171c;
+  --muted: #5b6068;
+  --faint: #858a91;
+  --line: #e5e5df;
+  --line-strong: #cecec5;
+  --accent: #0e6b45;
+  --accent-soft: #eaf2ec;
+  --accent-strong: #0b5738;
+  --selected: #0e6b45;
+  --selected-soft: #f5faf6;
+  --warn: #72540a;
+  --warn-soft: #fff8e7;
+}
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 560px at 82% -10%, #ffffff 0%, rgba(255, 255, 255, 0) 64%),
+    linear-gradient(180deg, #f7f7f4 0%, var(--bg) 100%);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 24px;
+  width: min(1560px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 24px 0 40px;
+  align-items: start;
+}
+.picker-shell {
+  min-width: 0;
+  overflow: clip;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 22px;
+  box-shadow: 0 22px 58px -32px rgba(21, 23, 28, 0.36), 0 2px 8px rgba(21, 23, 28, 0.05);
+}
+.picker-shell header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom-color: var(--line);
+  box-shadow: none;
+  backdrop-filter: blur(16px);
+}
+.picker-shell .topbar,
+.picker-shell .picker-main {
+  max-width: none;
+  margin: 0;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+.picker-shell .topbar {
+  gap: 12px;
+  padding-top: 22px;
+  padding-bottom: 18px;
+}
+.picker-main {
+  padding-top: 22px;
+  padding-bottom: 28px;
+}
+.picker-identity {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.product-lockup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  flex-wrap: nowrap;
+}
+.product-title {
+  margin: 0;
+  color: #171a17;
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 0.98;
+  letter-spacing: -0.05em;
+}
+.product-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+  margin-left: auto;
+}
+.wikiportraits-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--accent-strong);
+  font-weight: 750;
+  text-decoration: none;
+}
+.wikiportraits-link:hover,
+.wikiportraits-link:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.wikiportraits-logo {
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rail-kicker,
+.used-label,
+.target-card > p {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.task-row {
+  margin-top: 22px;
+}
+.task-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+.summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  margin: 0;
+  padding: 5px 11px;
+  color: #fff;
+  background: var(--selected);
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 7px;
+  background: #8ff0bf;
+  border-radius: 50%;
+}
+.result-count {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+.mobile-save-actions {
+  display: none;
+}
+input[type="search"],
+button {
+  border-color: var(--line-strong);
+  border-radius: 9px;
+}
+input[type="search"] {
+  background: var(--panel-soft);
+}
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+button.primary:hover,
+button.primary:focus-visible {
+  background: var(--accent-strong);
+}
+.mode-tabs {
+  background: var(--panel-soft);
+  border-color: var(--line);
+  border-radius: 10px;
+}
+.bulk-tools {
+  row-gap: 8px;
+}
+.sections {
+  gap: 32px;
+}
+.section-heading {
+  border-bottom: 0;
+  padding-bottom: 2px;
+}
+.section-heading h2 {
+  font-size: 20px;
+  letter-spacing: -0.015em;
+}
+.grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 28px 24px;
+}
+.photo {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border-color: rgba(213, 211, 202, 0.78);
+  border-radius: 20px;
+  box-shadow:
+    0 1px 2px rgba(21, 23, 28, 0.035),
+    0 12px 32px -26px rgba(21, 23, 28, 0.3);
+  transition: border-color 220ms ease, box-shadow 220ms ease;
+}
+.photo::before {
+  display: none;
+}
+.photo:hover,
+.photo:focus-visible {
+  border-color: rgba(14, 107, 69, 0.58);
+  outline: none;
+  box-shadow:
+    0 2px 5px rgba(21, 23, 28, 0.05),
+    0 22px 46px -30px rgba(21, 23, 28, 0.42);
+}
+.photo.selected {
+  border-color: transparent;
+  background: var(--panel);
+  box-shadow: 0 0 0 2px var(--selected), 0 14px 32px -22px rgba(14, 107, 69, 0.52);
+}
+.select-control {
+  position: absolute;
+  z-index: 3;
+  top: 11px;
+  left: 11px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: transparent;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  box-shadow: 0 2px 7px rgba(21, 23, 28, 0.18);
+  backdrop-filter: blur(5px);
+  cursor: pointer;
+  transition: color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+.select-control:hover {
+  box-shadow: 0 4px 12px rgba(21, 23, 28, 0.22);
+}
+.photo.selected .select-control {
+  color: #fff;
+  background: var(--selected);
+  border-color: var(--selected);
+}
+.select-control input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.select-indicator {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+}
+.select-control input:focus-visible + .select-indicator {
+  outline: 3px solid rgba(14, 107, 69, 0.28);
+  outline-offset: 3px;
+}
+.thumb {
+  aspect-ratio: 4 / 5;
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(145deg, #ecece7, #f7f7f4);
+}
+.thumb::before,
+.thumb::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+  filter:
+    drop-shadow(0 1px 1px rgba(5, 48, 31, 0.52))
+    drop-shadow(0 0 2px rgba(255, 255, 255, 0.35));
+}
+.thumb::before {
+  top: 12px;
+  right: 12px;
+  border-top: 1px solid rgba(88, 211, 148, 0.98);
+  border-right: 1px solid rgba(88, 211, 148, 0.98);
+}
+.thumb::after {
+  bottom: 12px;
+  left: 12px;
+  border-bottom: 1px solid rgba(88, 211, 148, 0.98);
+  border-left: 1px solid rgba(88, 211, 148, 0.98);
+}
+.thumb img {
+  object-fit: cover;
+  object-position: 50% 20%;
+  background: #f4f4f0;
+}
+.photo-image {
+  position: relative;
+  min-width: 0;
+}
+.photo-content {
+  display: grid;
+  gap: 7px;
+  padding: 18px 18px 20px;
+}
+.photo-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 144px;
+  padding: 24px 22px 22px;
+  background:
+    radial-gradient(220px 130px at 100% 0%, rgba(14, 107, 69, 0.1), transparent 72%),
+    linear-gradient(145deg, #fff 0%, #faf9f5 100%);
+  border-bottom: 1px solid rgba(213, 211, 202, 0.72);
+}
+.photo-title::after {
+  content: "";
+  position: absolute;
+  right: 22px;
+  bottom: -1px;
+  left: 22px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(14, 107, 69, 0.18), transparent 76%);
+}
+.photo-caption {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: #20251f;
+  font-family: "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.used-label {
+  margin: 0 0 1px;
+}
+.article-preview-list,
+.article-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.article-preview-list li,
+.article-list li {
+  min-width: 0;
+}
+.article-preview-list a,
+.article-list a {
+  color: var(--ink);
+  text-decoration: none;
+}
+.article-preview-list a {
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.32;
+  letter-spacing: -0.01em;
+}
+.article-preview-list a:hover,
+.article-preview-list a:focus-visible,
+.article-list a:hover,
+.article-list a:focus-visible {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.article-language {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.article-fallback {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.article-disclosure,
+.photo-details,
+.edit-receipt {
+  min-width: 0;
+}
+.article-disclosure > summary,
+.photo-details > summary,
+.edit-receipt > summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+.article-disclosure > summary:hover,
+.article-disclosure > summary:focus-visible,
+.photo-details > summary:hover,
+.photo-details > summary:focus-visible,
+.edit-receipt > summary:hover,
+.edit-receipt > summary:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.article-list {
+  gap: 5px;
+  max-height: 180px;
+  margin: 8px 0 2px;
+  padding: 8px 4px 4px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.language-groups {
+  display: grid;
+  gap: 12px;
+  max-height: 240px;
+  margin-top: 8px;
+  padding-top: 8px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+.language-group h3 {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+.language-group .article-list {
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border-top: 0;
+}
+.photo-details {
+  margin-top: 7px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.technical-details {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+}
+.file-name {
+  margin: 0 !important;
+  color: var(--faint);
+  font-size: 12.5px !important;
+  font-weight: 500 !important;
+  line-height: 1.35 !important;
+}
+.card-footer {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.commons-link {
+  color: var(--accent-strong);
+  font-weight: 650;
+}
+.target {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.action-rail {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+.rail-intro,
+.preview-panel {
+  padding: 2px 4px 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.rail-intro h2 {
+  margin: 8px 0 8px;
+  font-size: 21px;
+  line-height: 1.22;
+  letter-spacing: -0.02em;
+}
+.rail-intro > #rail-state-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+.selection-flow {
+  display: grid;
+  grid-template-columns: auto 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 12px 0;
+  color: var(--accent-strong);
+  border-top: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 13px;
+}
+.selection-flow[hidden] {
+  display: none;
+}
+.selection-flow strong {
+  font-size: 14px;
+}
+.selection-flow span:last-child {
+  overflow-wrap: anywhere;
+}
+.target-card {
+  display: block;
+  padding: 20px;
+  color: #fff;
+  background: linear-gradient(135deg, #0f7049, #0a4f33);
+  border-radius: 18px;
+  box-shadow: 0 18px 38px -25px rgba(10, 79, 51, 0.7);
+  text-decoration: none;
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+.target-card[href]:hover,
+.target-card[href]:focus-visible {
+  color: #fff;
+  background: linear-gradient(135deg, #118058, #075338);
+  box-shadow: 0 20px 42px -23px rgba(10, 79, 51, 0.78);
+  outline: 3px solid rgba(88, 211, 148, 0.32);
+  outline-offset: 3px;
+}
+.target-card > p {
+  margin: 0;
+  color: #a9e9c8;
+}
+.target-card h2 {
+  margin: 6px 0 8px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 23px;
+  line-height: 1.16;
+  overflow-wrap: anywhere;
+}
+.target-card span {
+  display: block;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.target-card .target-card-action {
+  display: none;
+  margin-top: 14px;
+  color: #fff;
+  font-weight: 750;
+}
+.target-card[href] .target-card-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.target-card .target-card-action [aria-hidden="true"] {
+  display: inline;
+}
+.preview-panel {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-top: 19px;
+  border-top: 1px solid var(--line-strong);
+}
+.preview-panel .rail-kicker {
+  margin: 0 0 6px;
+}
+.preview-header h2 {
+  font-size: 18px;
+}
+.preview-edits {
+  max-height: 210px;
+  margin-top: 9px;
+  padding: 11px;
+  background: var(--panel-soft);
+  border-color: var(--line);
+  font-size: 12px;
+}
+.next-command {
+  font-size: 13px;
+}
+.status {
+  min-height: 20px;
+  padding: 0 3px;
+}
+.rail-actions {
+  display: grid;
+  gap: 8px;
+  padding-top: 2px;
+}
+.rail-done {
+  width: 100%;
+  min-height: 48px;
+  font-weight: 750;
+  box-shadow: 0 12px 28px -18px rgba(14, 107, 69, 0.75);
+}
+.article-dialog-trigger {
+  justify-self: start;
+  min-height: 0;
+  padding: 0;
+  color: var(--accent-strong);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-align: left;
+}
+.article-dialog-trigger:hover,
+.article-dialog-trigger:focus-visible {
+  color: var(--accent-strong);
+  background: transparent;
+}
+.article-dialog-trigger:hover {
+  outline: none;
+}
+.article-dialog-trigger:focus-visible {
+  outline: 3px solid rgba(14, 107, 69, 0.22);
+  outline-offset: 3px;
+}
+.article-more-count {
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.article-more-count::after {
+  color: var(--faint);
+  content: " ·";
+}
+.article-dialog-trigger:hover .article-dialog-action,
+.article-dialog-trigger:focus-visible .article-dialog-action {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.article-dialog {
+  width: min(1180px, calc(100% - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 22px;
+  box-shadow: 0 34px 90px -28px rgba(21, 23, 28, 0.62);
+  overflow: auto;
+}
+.article-dialog::backdrop {
+  background: rgba(24, 28, 26, 0.48);
+  backdrop-filter: blur(3px);
+}
+.article-dialog-shell {
+  min-height: 100%;
+  padding: 26px 28px 30px;
+}
+.article-dialog-header {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: start;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+.article-dialog-context {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+}
+.article-dialog-thumb {
+  display: block;
+  width: 92px;
+  aspect-ratio: 4 / 5;
+  object-fit: contain;
+  background: linear-gradient(145deg, #ecece7, #f7f7f4);
+  border-radius: 12px;
+}
+.article-dialog-copy .used-label {
+  margin: 0 0 7px;
+}
+.article-dialog-copy h2 {
+  margin: 0;
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 1.1;
+  letter-spacing: -0.025em;
+}
+.article-dialog-copy p:last-child {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+.article-dialog-close {
+  min-width: 74px;
+  color: var(--muted);
+  background: var(--panel-soft);
+  border-color: var(--line-strong);
+}
+.article-dialog-list {
+  columns: 5 190px;
+  column-gap: 24px;
+  margin: 0;
+  padding: 26px 0 0;
+  list-style: none;
+}
+.article-dialog-list li {
+  position: relative;
+  break-inside: avoid;
+  margin: 0 0 12px;
+  padding-left: 15px;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+.article-dialog-list li::before {
+  position: absolute;
+  top: 0.56em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  content: "";
+  background: var(--accent);
+  border-radius: 50%;
+}
+.article-dialog-list a {
+  color: var(--ink);
+  text-decoration: none;
+}
+.article-dialog-list a:hover,
+.article-dialog-list a:focus-visible {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (max-width: 1120px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px 20px;
+  }
+}
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    width: min(100% - 28px, 760px);
+    padding-top: 14px;
+  }
+  .action-rail {
+    position: static;
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+  .rail-intro,
+  .target-card {
+    min-height: 100%;
+  }
+  .preview-panel,
+  .rail-actions {
+    grid-column: 1 / -1;
+  }
+  .mobile-save-actions {
+    display: flex;
+  }
+}
+@media (max-width: 620px) {
+  .app-shell {
+    width: 100%;
+    padding: 0;
+  }
+  .picker-shell {
+    border-radius: 0;
+  }
+  .picker-shell .topbar,
+  .picker-shell .picker-main {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .picker-shell .topbar {
+    padding-top: 14px;
+  }
+  .header-main {
+    display: flex;
+    align-items: center;
+  }
+  .product-lockup {
+    display: grid;
+    gap: 7px;
+  }
+  .product-title {
+    font-size: 39px;
+  }
+  .product-separator {
+    display: none;
+  }
+  .product-credit {
+    font-size: 15px;
+    margin-left: 0;
+  }
+  .wikiportraits-logo {
+    width: 28px;
+    height: 28px;
+  }
+  .task-row {
+    margin-top: 18px;
+  }
+  .task-title {
+    font-size: 17px;
+  }
+  .mobile-save-actions button {
+    min-width: 76px;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+  }
+  .action-rail {
+    grid-template-columns: 1fr;
+    padding: 0 14px 24px;
+  }
+  .preview-panel,
+  .rail-actions {
+    grid-column: auto;
+  }
+  .article-dialog {
+    width: 100%;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+  .article-dialog-shell {
+    padding: 20px 18px 26px;
+  }
+  .article-dialog-header {
+    gap: 14px;
+  }
+  .article-dialog-context {
+    grid-template-columns: 70px minmax(0, 1fr);
+    gap: 13px;
+  }
+  .article-dialog-thumb {
+    width: 70px;
+  }
+  .article-dialog-copy h2 {
+    font-size: 23px;
+  }
+  .article-dialog-close {
+    min-width: 0;
+    padding: 8px 10px;
+  }
+  .article-dialog-list {
+    columns: 1;
+    padding-top: 22px;
+  }
+}
 </style>
 </head>
 <body>
-<header>
-  <div class="topbar">
-    <div class="header-main">
-      <div class="title-block">
-        <p class="eyebrow">Credit Check</p>
-        <h1 id="screen-title">Choose photos to add</h1>
-        <div class="summary" id="summary"></div>
+<div class="app-shell">
+  <section class="picker-shell" aria-labelledby="product-title screen-title">
+    <header>
+      <div class="topbar">
+        <div class="header-main">
+          <div class="picker-identity">
+            <div class="title-block">
+              <div class="product-lockup">
+                <h1 class="product-title" id="product-title">Credit Check</h1>
+                <span class="product-credit">A free tool from <a class="wikiportraits-link" href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer"><span>WikiPortraits</span><img class="wikiportraits-logo" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt=""></a></span>
+              </div>
+              <div class="title-row task-row">
+                <h2 class="task-title" id="screen-title">Photos credited to you</h2>
+                <div class="summary" id="summary"></div>
+              </div>
+              <p class="result-count" id="result-count"></p>
+            </div>
+          </div>
+          <div class="save-actions mobile-save-actions">
+            <button type="button" class="primary" data-action="done">Done</button>
+          </div>
+        </div>
+        <div class="toolbar-row primary-tools">
+          <input id="search" type="search" autocomplete="off" aria-label="Filter photos" placeholder="Filter by filename, article, category, or number of Wikipedia articles">
+          <div class="mode-tabs" role="group" aria-label="Review mode">
+            <button type="button" data-mode="all">All</button>
+            <button type="button" data-mode="selected">Selected</button>
+            <button type="button" data-mode="unselected">Not selected yet</button>
+          </div>
+        </div>
+        <div class="toolbar-row bulk-tools">
+          <button type="button" class="secondary" data-action="select-visible">Select shown</button>
+          <button type="button" class="secondary" data-action="clear-visible">Unselect shown</button>
+          <button type="button" class="secondary" data-action="select-all">Select all</button>
+          <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
+          <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
+        </div>
       </div>
-      <div class="save-actions">
-        <button type="button" class="primary" data-action="done">Done</button>
-      </div>
-    </div>
-    <div class="toolbar-row primary-tools">
-      <input id="search" type="search" autocomplete="off" placeholder="Filter by filename, category, or number of Wikipedia articles">
-      <div class="mode-tabs" role="group" aria-label="Review mode">
-        <button type="button" data-mode="all">All</button>
-        <button type="button" data-mode="selected">Selected</button>
-        <button type="button" data-mode="unselected">Not selected yet</button>
-      </div>
-    </div>
-    <div class="toolbar-row bulk-tools">
-      <button type="button" class="secondary" data-action="select-visible">Select shown</button>
-      <button type="button" class="secondary" data-action="clear-visible">Unselect shown</button>
-      <button type="button" class="secondary" data-action="select-all">Select all</button>
-      <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
-      <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
-    </div>
-    <div class="status" id="status" role="status" aria-live="polite"></div>
-  </div>
-</header>
-<main>
-  <section class="preview-panel" id="preview-panel">
-    <div class="preview-header">
-      <div>
-        <h2>Commons edits</h2>
-        <p id="preview-summary"></p>
-      </div>
-    </div>
-    <pre class="preview-edits" id="preview-edits"></pre>
-    <p class="next-command" id="next-command"></p>
+    </header>
+    <main class="picker-main">
+      <div class="notice" id="ambiguous-note"></div>
+      <div class="empty" id="empty">No photos match this view.</div>
+      <div class="sections" id="sections" aria-label="Photos"></div>
+    </main>
   </section>
-  <div class="notice" id="ambiguous-note"></div>
-  <div class="empty" id="empty">No photos match this view.</div>
-  <div class="sections" id="sections" aria-label="Photos"></div>
-</main>
+  <aside class="action-rail" aria-label="Selection and next step">
+    <div class="rail-intro">
+      <p class="rail-kicker">Your selection</p>
+      <h2 id="rail-state-title">Choose the photos you want to gather under your name.</h2>
+      <p id="rail-state-copy">Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.</p>
+      <div class="selection-flow" id="selection-flow" hidden>
+        <strong id="rail-selected-count"></strong>
+        <span aria-hidden="true">→</span>
+        <span id="rail-flow-target"></span>
+      </div>
+    </div>
+    <a class="target-card" id="target-card" target="_blank" rel="noreferrer">
+      <p>Your photographer category</p>
+      <h2 id="target-summary"></h2>
+      <span>One place to keep track of the Wikipedia articles using your photos.</span>
+      <span class="target-card-action">Open on Wikimedia Commons <span aria-hidden="true">↗</span></span>
+    </a>
+    <section class="preview-panel" id="preview-panel">
+      <div class="preview-header">
+        <div>
+          <p class="rail-kicker">Ready when you are</p>
+          <h2>Wikimedia Commons edits</h2>
+          <p id="preview-summary"></p>
+        </div>
+      </div>
+      <details class="edit-receipt" id="edit-receipt" hidden>
+        <summary>Review exact Wikimedia Commons edits</summary>
+        <pre class="preview-edits" id="preview-edits"></pre>
+      </details>
+      <p class="next-command" id="next-command"></p>
+    </section>
+    <div class="rail-actions">
+      <div class="status" id="status" role="status" aria-live="polite"></div>
+      <button type="button" class="primary rail-done" data-action="done">Done</button>
+    </div>
+  </aside>
+</div>
+<dialog class="article-dialog" id="article-dialog" aria-labelledby="article-dialog-title" aria-describedby="article-dialog-description">
+  <div class="article-dialog-shell">
+    <header class="article-dialog-header">
+      <div class="article-dialog-context">
+        <img class="article-dialog-thumb" id="article-dialog-thumb" alt="">
+        <div class="article-dialog-copy">
+          <p class="used-label">Your photo appears in</p>
+          <h2 id="article-dialog-title" tabindex="-1"></h2>
+          <p id="article-dialog-description" hidden></p>
+        </div>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="article-dialog-close">Close</button>
+      </form>
+    </header>
+    <ul class="article-dialog-list" id="article-dialog-list"></ul>
+  </div>
+</dialog>
 <script>
 window.CREDIT_CHECK_REVIEW = __REVIEW_JSON__;
 window.CREDIT_CHECK_REVIEW_ARG = __REVIEW_ARG_JSON__;
@@ -1471,6 +2599,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const sections = document.getElementById("sections");
   const empty = document.getElementById("empty");
   const summary = document.getElementById("summary");
+  const resultCount = document.getElementById("result-count");
   const status = document.getElementById("status");
   const search = document.getElementById("search");
   const modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
@@ -1478,9 +2607,42 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const ambiguousNote = document.getElementById("ambiguous-note");
   const previewSummary = document.getElementById("preview-summary");
   const previewEdits = document.getElementById("preview-edits");
+  const editReceipt = document.getElementById("edit-receipt");
   const nextCommand = document.getElementById("next-command");
+  const targetSummary = document.getElementById("target-summary");
+  const targetCard = document.getElementById("target-card");
+  const railStateTitle = document.getElementById("rail-state-title");
+  const railStateCopy = document.getElementById("rail-state-copy");
+  const selectionFlow = document.getElementById("selection-flow");
+  const railSelectedCount = document.getElementById("rail-selected-count");
+  const railFlowTarget = document.getElementById("rail-flow-target");
+  const doneButtons = Array.from(document.querySelectorAll('[data-action="done"]'));
+  const articleDialog = document.getElementById("article-dialog");
+  const articleDialogTitle = document.getElementById("article-dialog-title");
+  const articleDialogThumb = document.getElementById("article-dialog-thumb");
+  const articleDialogDescription = document.getElementById("article-dialog-description");
+  const articleDialogList = document.getElementById("article-dialog-list");
   const targets = Array.from(new Set(items.map((item) => item.target)));
   const singleTarget = targets.length === 1;
+  const ENGLISH_ARTICLE_LIMIT = 5;
+  const wikipediaLanguageNames = {
+    "als": "Alemannic",
+    "bat-smg": "Samogitian",
+    "be-tarask": "Belarusian (Taraškievica)",
+    "cbk-zam": "Chavacano",
+    "fiu-vro": "Võro",
+    "map-bms": "Banyumasan",
+    "nds-nl": "Dutch Low Saxon",
+    "roa-rup": "Aromanian",
+    "roa-tara": "Tarantino",
+    "simple": "Simple English",
+    "zh-classical": "Classical Chinese",
+    "zh-min-nan": "Min Nan Chinese",
+    "zh-yue": "Cantonese",
+  };
+  const languageDisplayNames = typeof Intl.DisplayNames === "function"
+    ? new Intl.DisplayNames(["en"], { type: "language" })
+    : null;
   let currentMode = ["all", "selected", "unselected"].includes(window.CREDIT_CHECK_INITIAL_MODE)
     ? window.CREDIT_CHECK_INITIAL_MODE
     : "all";
@@ -1488,11 +2650,33 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let saveTimer = null;
   let pendingSave = false;
   let selectionRevision = 0;
+  let articleDialogOpener = null;
 
-  if (singleTarget) {
-    screenTitle.textContent = `Choose photos to add to Category:${targets[0]}`;
+  screenTitle.textContent = "Photos credited to you";
+  const photographerPrefix = "Photographs by ";
+  if (singleTarget && targets[0].startsWith(photographerPrefix)) {
+    targetSummary.append(
+      document.createTextNode(photographerPrefix.trim()),
+      document.createElement("br"),
+      document.createTextNode(targets[0].slice(photographerPrefix.length))
+    );
   } else {
-    screenTitle.textContent = `Choose photos to add to ${targets.length} categories`;
+    targetSummary.textContent = singleTarget
+      ? targets[0]
+      : `${targets.length} Wikimedia Commons categories`;
+  }
+  function commonsCategoryUrl(category) {
+    const path = `Category:${category}`.replace(/ /g, "_");
+    return `https://commons.wikimedia.org/wiki/${encodeURIComponent(path)
+      .replace(/%3A/g, ":")
+      .replace(/%2F/g, "/")}`;
+  }
+  if (singleTarget) {
+    targetCard.href = commonsCategoryUrl(targets[0]);
+    targetCard.setAttribute(
+      "aria-label",
+      `Open Category:${targets[0]} on Wikimedia Commons`
+    );
   }
   if (ambiguousCount > 0) {
     const noun = ambiguousCount === 1 ? "photo needs" : "photos need";
@@ -1512,7 +2696,21 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function itemText(item) {
-    return [item.label, item.title, item.target, item.uses].join(" ").toLowerCase();
+    const articleTitles = (item.articles || []).map((article) => article.title);
+    return [item.caption, item.label, item.title, item.target, item.uses, ...articleTitles]
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function filenamePhotoTitle(label) {
+    return String(label || "")
+      .replace(/\\.[^.]+$/, "")
+      .replace(/\\s*\\((?:cropped[^)]*)\\)\\s*$/i, "")
+      .replace(/^\\d{4}-\\d{2}-\\d{2}\\s+/, "")
+      .replace(/\\s+\\d+\\s*$/, "")
+      .replace(/[-_]+/g, " ")
+      .replace(/\\s+/g, " ")
+      .trim();
   }
 
   function visibleItems() {
@@ -1539,39 +2737,165 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function usesText(item) {
-    if (item.uses === null || item.uses === undefined) return "Uses unknown";
-    return `${item.uses} ${item.uses === 1 ? "use" : "uses"}`;
+    if (item.uses === null || item.uses === undefined) return "Wikipedia use unknown";
+    return `${item.uses} Wikipedia ${item.uses === 1 ? "page" : "pages"}`;
+  }
+
+  function articleLanguage(article) {
+    if (article.lang) return article.lang.toLowerCase();
+    return (article.wiki || "").split(".", 1)[0].toLowerCase();
+  }
+
+  function languageName(code) {
+    if (!code) return "Unknown language";
+    if (wikipediaLanguageNames[code]) return wikipediaLanguageNames[code];
+    if (languageDisplayNames) {
+      try {
+        const name = languageDisplayNames.of(code);
+        if (name && name.toLowerCase() !== code.toLowerCase()) return name;
+      } catch (error) {
+        // Some Wikimedia language codes predate or extend BCP 47.
+      }
+    }
+    return code.toUpperCase();
+  }
+
+  function articleListHtml(articles, showLanguage = false, preview = false) {
+    return `<ul class="${preview ? "article-preview-list" : "article-list"}">${articles.map((article) => {
+      const language = showLanguage
+        ? `<span class="article-language">${escapeHtml(languageName(articleLanguage(article)))} Wikipedia</span>`
+        : "";
+      return `<li><a href="${escapeHtml(article.url)}" target="_blank" rel="noreferrer">${escapeHtml(article.title)}</a>${language}</li>`;
+    }).join("")}</ul>`;
+  }
+
+  function articleDialogListHtml(articles) {
+    return articles.map((article) =>
+      `<li><a href="${escapeHtml(article.url)}" target="_blank" rel="noreferrer">${escapeHtml(article.title)}</a></li>`
+    ).join("");
+  }
+
+  function groupedArticleHtml(articles) {
+    const groups = new Map();
+    articles.forEach((article) => {
+      const language = articleLanguage(article);
+      if (!groups.has(language)) groups.set(language, []);
+      groups.get(language).push(article);
+    });
+    return Array.from(groups.entries())
+      .sort(([left], [right]) => languageName(left).localeCompare(languageName(right)))
+      .map(([language, languageArticles]) => `<section class="language-group">
+        <h3>${escapeHtml(languageName(language))} Wikipedia (${languageArticles.length})</h3>
+        ${articleListHtml(languageArticles)}
+      </section>`)
+      .join("");
+  }
+
+  function moreWikipediaPages(pageCount, languageCount, otherLanguages = false) {
+    const pageWord = pageCount === 1 ? "page" : "pages";
+    const languageWord = languageCount === 1 ? "language" : "languages";
+    const preposition = languageCount === 1 ? "in" : "across";
+    return `${pageCount} more Wikipedia ${pageWord} ${preposition} ${languageCount} ${otherLanguages ? "other " : ""}${languageWord}`;
+  }
+
+  function articleHtml(item) {
+    const articles = item.articles || [];
+    if (!articles.length) {
+      return `<p class="article-fallback">${escapeHtml(usesText(item))}</p>`;
+    }
+    const englishArticles = articles.filter((article) => articleLanguage(article) === "en");
+    const otherArticles = articles.filter((article) => articleLanguage(article) !== "en");
+
+    if (!englishArticles.length) {
+      const primary = articles[0];
+      const remaining = articles.slice(1);
+      const remainingLanguages = new Set(remaining.map(articleLanguage)).size;
+      const more = remaining.length
+        ? `<details class="article-disclosure other-language-disclosure">
+            <summary>Plus ${escapeHtml(moreWikipediaPages(remaining.length, remainingLanguages))}</summary>
+            <div class="language-groups">${groupedArticleHtml(remaining)}</div>
+          </details>`
+        : "";
+      return `${articleListHtml([primary], true, true)}${more}`;
+    }
+
+    const visibleEnglish = englishArticles.slice(0, ENGLISH_ARTICLE_LIMIT);
+    const hiddenEnglishCount = englishArticles.length - visibleEnglish.length;
+    const otherLanguages = new Set(otherArticles.map(articleLanguage)).size;
+    const allEnglish = hiddenEnglishCount > 0
+      ? `<button type="button" class="article-dialog-trigger" data-article-dialog-line="${item.line}" aria-haspopup="dialog"><span class="article-more-count">+ ${hiddenEnglishCount} more</span> <span class="article-dialog-action">View all ${englishArticles.length} English-language Wikipedia articles</span></button>`
+      : "";
+    const moreLanguages = otherArticles.length
+      ? `<details class="article-disclosure other-language-disclosure">
+          <summary>Plus ${escapeHtml(moreWikipediaPages(otherArticles.length, otherLanguages, true))}</summary>
+          <div class="language-groups">${groupedArticleHtml(otherArticles)}</div>
+        </details>`
+      : "";
+    return `${articleListHtml(visibleEnglish, false, true)}${allEnglish}${moreLanguages}`;
+  }
+
+  function openArticleDialog(line, opener) {
+    const item = items.find((candidate) => candidate.line === line);
+    if (!item) return;
+    const englishArticles = (item.articles || []).filter(
+      (article) => articleLanguage(article) === "en"
+    );
+    if (!englishArticles.length) return;
+    articleDialogOpener = opener;
+    articleDialogTitle.textContent = `${englishArticles.length} English-language Wikipedia ${englishArticles.length === 1 ? "article" : "articles"}`;
+    articleDialogThumb.src = item.thumb_url;
+    const caption = String(item.caption || "").trim();
+    articleDialogDescription.textContent = caption;
+    articleDialogDescription.hidden = !caption;
+    articleDialogList.innerHTML = articleDialogListHtml(englishArticles);
+    articleDialog.showModal();
+    articleDialogTitle.focus({ preventScroll: true });
   }
 
   function cardHtml(item) {
     const selectedClass = item.selected ? " selected" : "";
     const checked = item.selected ? " checked" : "";
-    const selectText = item.selected ? "Selected" : "Select";
     const targetLine = singleTarget ? "" : `<p class="target">Category:${escapeHtml(item.target)}</p>`;
+    const selectionLabel = item.selected ? `Unselect ${item.label}` : `Select ${item.label}`;
+    const caption = String(item.caption || "").trim();
+    const photoTitle = caption || filenamePhotoTitle(item.label);
+    const captionLine = photoTitle
+      ? `<div class="photo-title"><p class="photo-caption" title="${escapeHtml(photoTitle)}">${escapeHtml(photoTitle)}</p></div>`
+      : "";
     return `<article class="photo${selectedClass}" tabindex="0" data-line="${item.line}" data-file-url="${escapeHtml(item.file_url)}">
-      <label class="select-line">
-        <input type="checkbox" data-line="${item.line}"${checked}>
-        <span>${selectText}</span>
-      </label>
-      <a class="thumb" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">
-        <span class="thumb-placeholder">Loading thumbnail</span>
-        <span class="selected-badge" aria-hidden="true">&#10003;</span>
-        <img src="${escapeHtml(item.thumb_url)}" loading="lazy" alt="">
-      </a>
-      <h3><a href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.label)}</a></h3>
-      <div class="card-footer">
-        <span class="use-badge">${escapeHtml(usesText(item))}</span>
-        <a class="commons-link" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">Open on Commons</a>
+      ${captionLine}
+      <div class="photo-image">
+        <label class="select-control" title="${escapeHtml(selectionLabel)}">
+          <input type="checkbox" data-line="${item.line}" aria-label="${escapeHtml(selectionLabel)}"${checked}>
+          <span class="select-indicator" aria-hidden="true">✓</span>
+        </label>
+        <a class="thumb" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">
+          <span class="thumb-placeholder">Loading thumbnail</span>
+          <img src="${escapeHtml(item.thumb_url)}" loading="lazy" alt="">
+        </a>
       </div>
-      ${targetLine}
+      <div class="photo-content">
+        <p class="used-label">Your photo appears in</p>
+        ${articleHtml(item)}
+        <details class="photo-details">
+          <summary>Photo details</summary>
+          <div class="technical-details">
+            <h3 class="file-name">${escapeHtml(item.label)}</h3>
+            <div class="card-footer">
+              <a class="commons-link" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">Open on Wikimedia Commons ↗</a>
+            </div>
+            ${targetLine}
+          </div>
+        </details>
+      </div>
     </article>`;
   }
 
   function sectionHtml(group) {
-    const title = singleTarget ? "Photos you can add to this category" : `Category:${group.target}`;
+    const title = singleTarget ? "Choose photos to add" : `Category:${group.target}`;
     const count = `${group.items.length} ${group.items.length === 1 ? "photo" : "photos"}`;
     const selected = group.items.filter((item) => item.selected).length;
-    return `<section class="section">
+    return `<section class="section" data-target="${escapeHtml(group.target)}">
       <div class="section-heading">
         <h2>${escapeHtml(title)}</h2>
         <p>${selected} selected / ${count}</p>
@@ -1582,8 +2906,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
   function updateSummary(visible) {
     const selected = items.filter((item) => item.selected).length;
-    const showing = visible.length === items.length ? "" : ` · ${visible.length} showing`;
-    summary.textContent = `${items.length} photos · ${selected} selected${showing}`;
+    summary.textContent = `${selected} selected`;
+    resultCount.textContent = visible.length === items.length
+      ? `${items.length} photos found on Wikipedia`
+      : `${visible.length} of ${items.length} photos showing`;
   }
 
   function renderModeButtons() {
@@ -1620,16 +2946,62 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   function renderPreview() {
     const selected = selectedItems();
     if (!selected.length) {
+      railStateTitle.textContent = "Choose the photos you want to gather under your name.";
+      railStateCopy.textContent = "Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.";
+      selectionFlow.hidden = true;
       previewSummary.textContent = "No photos selected yet.";
-      previewEdits.textContent = "Select photos to see the category edits here.";
+      previewEdits.textContent = "";
+      editReceipt.hidden = true;
       nextCommand.textContent = "";
+      doneButtons.forEach((button) => { button.textContent = "Done"; });
       return;
     }
-    previewSummary.textContent = `${selected.length} ${selected.length === 1 ? "category edit" : "category edits"} ready for Commons.`;
+    const selectedTargets = Array.from(new Set(selected.map((item) => item.target)));
+    const photoNoun = selected.length === 1 ? "photo" : "photos";
+    railStateTitle.textContent = `${selected.length} ${photoNoun} selected`;
+    railStateCopy.textContent = "Your choices are saved. Review the exact edits below, or keep choosing photos.";
+    railSelectedCount.textContent = `${selected.length} ${photoNoun}`;
+    railFlowTarget.textContent = selectedTargets.length === 1
+      ? selectedTargets[0]
+      : `${selectedTargets.length} Wikimedia Commons categories`;
+    selectionFlow.hidden = false;
+    previewSummary.textContent = `${selected.length} ${selected.length === 1 ? "category edit" : "category edits"} ready for Wikimedia Commons.`;
     previewEdits.textContent = selected.map((item) =>
       `+ [[Category:${item.target}]]  ->  ${item.title}`
     ).join("\\n");
+    editReceipt.hidden = false;
     nextCommand.textContent = nextStepText();
+    doneButtons.forEach((button) => {
+      button.textContent = button.closest(".mobile-save-actions")
+        ? "Done"
+        : `Done · ${selected.length} selected`;
+    });
+  }
+
+  function syncThumbnailState(image, failed = false) {
+    const thumb = image.closest(".thumb");
+    if (!thumb) return;
+    const placeholder = thumb.querySelector(".thumb-placeholder");
+    const loaded = !failed && image.naturalWidth > 0;
+    const missing = failed || (image.complete && image.naturalWidth === 0);
+    thumb.classList.toggle("image-loaded", loaded);
+    thumb.classList.toggle("image-missing", missing);
+    if (!placeholder) return;
+    placeholder.hidden = loaded;
+    placeholder.textContent = missing
+      ? "Thumbnail unavailable — open on Wikimedia Commons"
+      : "Loading thumbnail";
+  }
+
+  function reconcileThumbnails() {
+    const images = Array.from(sections.querySelectorAll(".thumb img"));
+    images.slice(0, 6).forEach((image) => {
+      image.loading = "eager";
+      image.fetchPriority = "high";
+    });
+    images.forEach((image) => {
+      if (image.complete) syncThumbnailState(image);
+    });
   }
 
   function render() {
@@ -1638,6 +3010,51 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     updateSummary(visible);
     empty.classList.toggle("show", visible.length === 0);
     sections.innerHTML = groupItems(visible).map(sectionHtml).join("");
+    reconcileThumbnails();
+    renderPreview();
+  }
+
+  function syncCard(card, item) {
+    if (!card || !item) return;
+    card.classList.toggle("selected", item.selected);
+    const checkbox = card.querySelector('input[type="checkbox"]');
+    const selectionLabel = item.selected ? `Unselect ${item.label}` : `Select ${item.label}`;
+    if (checkbox) {
+      checkbox.checked = item.selected;
+      checkbox.setAttribute("aria-label", selectionLabel);
+    }
+    const label = card.querySelector(".select-control");
+    if (label) label.title = selectionLabel;
+  }
+
+  function updateSectionCounts() {
+    const visible = visibleItems();
+    sections.querySelectorAll(".section").forEach((section) => {
+      const group = visible.filter((item) => item.target === section.dataset.target);
+      const selected = group.filter((item) => item.selected).length;
+      const noun = group.length === 1 ? "photo" : "photos";
+      const count = section.querySelector(".section-heading p");
+      if (count) count.textContent = `${selected} selected / ${group.length} ${noun}`;
+    });
+  }
+
+  function refreshSelectionUi(line = null) {
+    if (currentMode !== "all") {
+      render();
+      return;
+    }
+    if (line === null) {
+      sections.querySelectorAll(".photo[data-line]").forEach((card) => {
+        const item = items.find((candidate) => candidate.line === Number(card.dataset.line));
+        syncCard(card, item);
+      });
+    } else {
+      const item = items.find((candidate) => candidate.line === line);
+      syncCard(document.querySelector(`.photo[data-line="${line}"]`), item);
+    }
+    const visible = visibleItems();
+    updateSummary(visible);
+    updateSectionCounts();
     renderPreview();
   }
 
@@ -1650,8 +3067,8 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         changed = true;
       }
     });
-    render();
     if (changed) {
+      refreshSelectionUi();
       selectionRevision += 1;
       scheduleSave();
     }
@@ -1663,7 +3080,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     item.selected = !item.selected;
     selectionRevision += 1;
     lastFocusedLine = line;
-    render();
+    refreshSelectionUi(line);
     scheduleSave();
     const card = document.querySelector(`.photo[data-line="${line}"]`);
     if (card) card.focus({ preventScroll: true });
@@ -1771,10 +3188,15 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   });
 
   sections.addEventListener("click", (event) => {
+    const articleTrigger = event.target.closest("[data-article-dialog-line]");
+    if (articleTrigger) {
+      openArticleDialog(Number(articleTrigger.dataset.articleDialogLine), articleTrigger);
+      return;
+    }
     const card = event.target.closest(".photo");
     if (!card) return;
     lastFocusedLine = Number(card.dataset.line);
-    if (event.target.closest("a, input, label")) return;
+    if (event.target.closest("a, button, input, label, summary, details")) return;
     toggleLine(Number(card.dataset.line));
   });
 
@@ -1786,30 +3208,32 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   sections.addEventListener("keydown", (event) => {
     const card = event.target.closest(".photo");
     if (!card || (event.key !== " " && event.key !== "Enter")) return;
-    if (event.target.closest("a, input")) return;
+    if (event.target.closest("a, button, input, summary, details")) return;
     event.preventDefault();
     toggleLine(Number(card.dataset.line));
   });
 
   sections.addEventListener("load", (event) => {
     if (event.target.tagName !== "IMG") return;
-    event.target.closest(".thumb").classList.add("image-loaded");
+    syncThumbnailState(event.target);
   }, true);
 
   sections.addEventListener("error", (event) => {
     if (event.target.tagName !== "IMG") return;
-    event.target.closest(".thumb").classList.add("image-missing");
+    syncThumbnailState(event.target, true);
   }, true);
 
   document.addEventListener("keydown", (event) => {
+    if (articleDialog.open) return;
     const typing = event.target.matches("input, textarea, select");
+    const interactive = event.target.closest("a, button, input, label, summary, details");
     if (event.key === "/" && !typing) {
       event.preventDefault();
       search.focus();
       search.select();
       return;
     }
-    if (typing) return;
+    if (typing || interactive) return;
     if (event.key === "o") {
       const line = focusedLine();
       if (line !== null) {
@@ -1825,6 +3249,19 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     }
   });
 
+  articleDialog.addEventListener("click", (event) => {
+    if (event.target === articleDialog) articleDialog.close();
+  });
+  articleDialog.addEventListener("close", () => {
+    const opener = articleDialogOpener;
+    articleDialogOpener = null;
+    articleDialogThumb.removeAttribute("src");
+    articleDialogDescription.textContent = "";
+    articleDialogDescription.hidden = true;
+    articleDialogList.innerHTML = "";
+    if (opener && opener.isConnected) opener.focus({ preventScroll: true });
+  });
+
   document.querySelector('[data-action="select-visible"]').addEventListener("click", () => {
     setSelection(visibleItems().map((item) => item.line), true);
   });
@@ -1837,7 +3274,9 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   document.querySelector('[data-action="clear-all"]').addEventListener("click", () => {
     setSelection(items.map((item) => item.line), false);
   });
-  document.querySelector('[data-action="done"]').addEventListener("click", () => save(true));
+  doneButtons.forEach((button) => {
+    button.addEventListener("click", () => save(true));
+  });
   search.addEventListener("input", render);
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
@@ -2248,7 +3687,7 @@ def review_file_with_pages(review, items, approvable):
         item = current_item()
         if item:
             webbrowser.open_new_tab(commons_file_url(item["title"]))
-            set_message("Opened current photo on Commons.")
+            set_message("Opened current photo on Wikimedia Commons.")
         invalidate(event)
 
     @kb.add("g")
@@ -2339,10 +3778,10 @@ def cmd_scan(args):
             if scan_mode == "of":
                 print(empty_review_message(review_mode="of"))
             else:
-                print("Credit Check couldn't find any Commons photos credited to you. "
-                      "Double-check your Commons username and credited name in Settings.")
+                print("Credit Check couldn't find any Wikimedia Commons photos credited to you. "
+                      "Double-check your Wikimedia Commons username and credited name in Settings.")
         else:
-            print("  found no files for user %s - check your Commons username in Settings."
+            print("  found no files for user %s - check your Wikimedia Commons username in Settings."
                   % username, file=sys.stderr)
         return False
     print("  %d possible matches. Fetching usage, categories, wikitext..." % candidate_count,
@@ -2384,6 +3823,27 @@ def cmd_scan(args):
         if promoted:
             print("  promoted %d derivative crop(s) via source chain." % len(promoted),
                   file=sys.stderr)
+
+    review_records = [
+        rec
+        for review_list in (by_list, of_list, amb_list)
+        for rec in review_list.values()
+    ]
+    if review_records:
+        print("  fetching English photo captions...", file=sys.stderr)
+        structured_captions = fetch_english_captions(
+            cl, [rec.get("pageid") for rec in review_records])
+        structured_count = 0
+        fallback_count = 0
+        for rec in review_records:
+            structured_caption = structured_captions.get(rec.get("pageid"), "")
+            if structured_caption:
+                structured_count += 1
+            elif rec.get("description"):
+                fallback_count += 1
+            rec["caption"] = structured_caption or rec.get("description", "")
+        print("  %d structured captions; %d useful description fallbacks."
+              % (structured_count, fallback_count), file=sys.stderr)
 
     meta = {
         "author": author,
@@ -2519,7 +3979,7 @@ def print_plan(approved, review, next_command=None, guided=False):
         print("%s selected." % photo_count(len(approved)))
     else:
         print("%s selected in %s." % (photo_count(len(approved)), review))
-    print("Preview - Commons edits (nothing is edited yet):")
+    print("Preview - Wikimedia Commons edits (nothing is edited yet):")
     print_category_preview(approved)
     if next_command:
         print("\nRun %s to make these edits." % next_command)
@@ -2621,7 +4081,7 @@ def bot_password_intro_lines():
     return [
         "Credit Check needs a Wikimedia Commons bot password before it can edit.",
         "",
-        "A bot password is an app password for your own Commons account, not a separate uploader.",
+        "A bot password is an app password for your own Wikimedia Commons account, not a separate uploader.",
         "A login like YourName@categorize still edits as YourName; the suffix just names this tool's credential.",
         "Credit Check only edits existing file pages to add categories. It does not upload files or change who uploaded them.",
         "",
@@ -2633,7 +4093,7 @@ def bot_password_intro_lines():
         "  5. Copy the generated username, like YourName@categorize, and the generated password.",
         "  6. Come back here and paste them below.",
         "",
-        "Do not use your main Commons password.",
+        "Do not use your main Wikimedia Commons password.",
         "",
     ]
 
@@ -2670,6 +4130,78 @@ def resolve_commit_credentials(args):
 
     return botuser, botpass
 
+def fetch_category_edit_state(cl, title, full_category):
+    data = cl.get({
+        "action": "query",
+        "titles": title,
+        "prop": "categories|revisions",
+        "clcategories": full_category,
+        "cllimit": "1",
+        "rvprop": "ids|timestamp",
+        "curtimestamp": "1",
+    })
+    pages = data.get("query", {}).get("pages", {})
+    if not pages:
+        raise ValueError("Wikimedia Commons returned no page data")
+    page = next(iter(pages.values()))
+    if "missing" in page or page.get("pageid") == -1:
+        raise ValueError("file page does not exist")
+    revisions = page.get("revisions") or []
+    if not revisions or not revisions[0].get("revid"):
+        raise ValueError("Wikimedia Commons returned no current revision")
+    return {
+        "category_present": bool(page.get("categories")),
+        "revid": revisions[0]["revid"],
+        "basetimestamp": revisions[0].get("timestamp"),
+        "starttimestamp": data.get("curtimestamp"),
+    }
+
+def post_category_edit(cl, csrf, title, full_category, summary, state):
+    edit_data = {
+        "title": title,
+        "appendtext": "\n[[%s]]\n" % full_category,
+        "summary": summary + " ([[%s]])" % full_category,
+        "token": csrf,
+        "assert": "user",
+        "nocreate": "1",
+        "maxlag": "5",
+        "baserevid": str(state["revid"]),
+    }
+    if state.get("basetimestamp"):
+        edit_data["basetimestamp"] = state["basetimestamp"]
+    if state.get("starttimestamp"):
+        edit_data["starttimestamp"] = state["starttimestamp"]
+    result = cl.post(
+        {"action": "edit"},
+        edit_data,
+        retry_api_errors=SAFE_API_RETRY_CODES,
+    )
+    if result.get("edit", {}).get("result") != "Success":
+        raise MediaWikiAPIError({
+            "code": "edit-failed",
+            "info": str(result),
+        }, result)
+
+def add_category_to_file(cl, csrf, title, full_category, summary):
+    state = fetch_category_edit_state(cl, title, full_category)
+    if state["category_present"]:
+        return "already"
+    try:
+        post_category_edit(cl, csrf, title, full_category, summary, state)
+        return "added"
+    except MediaWikiAPIError as error:
+        if error.code != "editconflict":
+            raise
+
+    # A page changed after the pre-check. Re-read it: if another edit added the
+    # category, count that as already done; otherwise retry once against the new
+    # revision. An unknown network outcome never reaches this branch.
+    state = fetch_category_edit_state(cl, title, full_category)
+    if state["category_present"]:
+        return "already"
+    post_category_edit(cl, csrf, title, full_category, summary, state)
+    return "added"
+
 def cmd_commit(args):
     approved = approved_or_exit(args.review)
     if not args.go:
@@ -2699,29 +4231,30 @@ def cmd_commit(args):
         print(full)
         for t in titles:
             progress += 1
-            d = cl.get({"action": "query", "titles": t, "prop": "categories",
-                        "clcategories": full, "cllimit": "1"})
-            page = next(iter(d["query"]["pages"].values()))
-            if page.get("categories"):
-                print_progress_line(progress, total, "Already there", t)
-                skipped += 1
-                continue
             try:
-                res = cl.post({"action": "edit"},
-                              {"title": t, "appendtext": "\n[[%s]]\n" % full,
-                               "summary": args.summary + " ([[%s]])" % full, "token": csrf,
-                               "assert": "user", "nocreate": "1", "maxlag": "5"})
+                result = add_category_to_file(
+                    cl, csrf, t, full, args.summary)
+            except MediaWikiAPIError as e:
+                print_progress_line(progress, total, "Failed", t, "api: %s" % e)
+                failed += 1
+                time.sleep(args.throttle)
+                continue
             except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
                 print_progress_line(progress, total, "Failed", t, "network: %s" % e)
                 failed += 1
                 time.sleep(args.throttle)
                 continue
-            if res.get("edit", {}).get("result") == "Success":
+            except (KeyError, TypeError, ValueError) as e:
+                print_progress_line(progress, total, "Failed", t, str(e))
+                failed += 1
+                time.sleep(args.throttle)
+                continue
+            if result == "added":
                 print_progress_line(progress, total, "Added", t)
                 added += 1
             else:
-                print_progress_line(progress, total, "Failed", t, str(res))
-                failed += 1
+                print_progress_line(progress, total, "Already there", t)
+                skipped += 1
             time.sleep(args.throttle)
     print_commit_done_summary(added, skipped, failed, args.review, approved,
                               guided=getattr(args, "guided", False))
@@ -2741,6 +4274,7 @@ def sample_review_data():
         "uploader": "SomeoneElse",
         "cats": {"Category:Example people"},
         "reason": {"credited"},
+        "caption": "Test Person at an example event.",
         "wp": {"en.wikipedia.org|Example": {
             "wiki": "en.wikipedia.org", "lang": "en", "title": "Example"}},
     }
@@ -2753,6 +4287,7 @@ def sample_of_review_data():
         "uploader": "SomeoneElse",
         "cats": {"Category:Example people"},
         "reason": {"depicts"},
+        "caption": "A portrait of Test Person.",
         "wp": {"en.wikipedia.org|Example": {
             "wiki": "en.wikipedia.org", "lang": "en", "title": "Example"}},
     }
@@ -2770,6 +4305,41 @@ def check_equal(name, got, expected):
     if got != expected:
         raise AssertionError("%s: got %r, expected %r" % (name, got, expected))
 
+def check_photo_caption_metadata():
+    check_equal("description html cleanup",
+                clean_commons_description("<div>Test &amp; <b>caption</b></div>"),
+                "Test & caption")
+    check_equal("multilingual description cleanup",
+                clean_commons_description({"_type": "text", "en": "English caption"}),
+                "English caption")
+    check_equal("crop boilerplate omitted",
+                useful_commons_description(
+                    "A cropped version of File:Example portrait.jpg"), "")
+    check_equal("useful description retained",
+                useful_commons_description("Test Person at an example event."),
+                "Test Person at an example event.")
+
+    class CaptionClient:
+        def get(self, params):
+            check_equal("caption API action", params["action"], "wbgetentities")
+            check_equal("caption API languages", params["languages"], "en")
+            return {
+                "entities": {
+                    "M123": {"labels": {"en": {"value": " Structured\ncaption "}}},
+                    "M456": {"labels": {"fr": {"value": "Légende"}}},
+                    "not-a-media-id": {"labels": {"en": {"value": "Ignore me"}}},
+                }
+            }
+
+    old_sleep = time.sleep
+    try:
+        time.sleep = lambda seconds: None
+        check_equal("English structured captions",
+                    fetch_english_captions(CaptionClient(), [123, None, 456]),
+                    {123: "Structured caption"})
+    finally:
+        time.sleep = old_sleep
+
 def check_retry_policy():
     class FailingOpener:
         def __init__(self):
@@ -2778,6 +4348,23 @@ def check_retry_policy():
         def open(self, url, data=None, timeout=60):
             self.calls += 1
             raise urllib.error.URLError("simulated lost response")
+
+    class JSONResponse(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            self.close()
+
+    class SequenceOpener:
+        def __init__(self, payloads):
+            self.payloads = list(payloads)
+            self.calls = 0
+
+        def open(self, url, data=None, timeout=60):
+            self.calls += 1
+            payload = self.payloads.pop(0)
+            return JSONResponse(json.dumps(payload).encode("utf-8"))
 
     old_sleep = time.sleep
     time.sleep = lambda seconds: None
@@ -2797,8 +4384,120 @@ def check_retry_policy():
         except urllib.error.URLError:
             pass
         check_equal("retryable POST attempts", cl.opener.calls, 3)
+
+        cl.opener = SequenceOpener([
+            {"error": {"code": "maxlag", "info": "Waiting for replicas", "lag": 0}},
+            {"edit": {"result": "Success"}},
+        ])
+        got = cl._call(
+            {"action": "edit"},
+            data={"title": "File:X.jpg"},
+            tries=3,
+            retry_api_errors=SAFE_API_RETRY_CODES,
+        )
+        check_equal("explicit safe API error retried", got["edit"]["result"], "Success")
+        check_equal("safe API retry attempts", cl.opener.calls, 2)
+
+        cl.opener = SequenceOpener([
+            {"error": {"code": "badtoken", "info": "Invalid token"}},
+        ])
+        try:
+            cl._call({"action": "edit"}, data={"title": "File:X.jpg"}, tries=3,
+                     retry_api_errors=SAFE_API_RETRY_CODES)
+            raise AssertionError("unsafe API error was retried or ignored")
+        except MediaWikiAPIError as error:
+            check_equal("API error code", error.code, "badtoken")
+        check_equal("unsafe API error attempts", cl.opener.calls, 1)
     finally:
         time.sleep = old_sleep
+
+def check_version_identity():
+    if __version__ not in UA:
+        raise AssertionError("User-Agent version does not match the app version")
+    if "github.com/incandescentman/credit-check" not in UA:
+        raise AssertionError("User-Agent is missing the project contact URL")
+    manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+    if os.path.exists(manifest):
+        text = open(manifest, encoding="utf-8").read()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        if not match:
+            raise AssertionError("pyproject.toml has no project version")
+        check_equal("source and package versions", __version__, match.group(1))
+
+def check_commit_write_safety():
+    def page_state(revid, category_present=False):
+        page = {
+            "pageid": 1,
+            "title": "File:Example.jpg",
+            "revisions": [{"revid": revid, "timestamp": "2026-07-13T12:00:00Z"}],
+        }
+        if category_present:
+            page["categories"] = [{"title": "Category:Photographs by Test Person"}]
+        return {
+            "curtimestamp": "2026-07-13T12:00:01Z",
+            "query": {"pages": {"1": page}},
+        }
+
+    class FakeClient:
+        def __init__(self, gets, posts):
+            self.gets = list(gets)
+            self.posts = list(posts)
+            self.post_calls = []
+
+        def get(self, params):
+            value = self.gets.pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def post(self, params, data, retry_api_errors=None):
+            self.post_calls.append((params, data, retry_api_errors))
+            value = self.posts.pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+    full = "Category:Photographs by Test Person"
+    client = FakeClient([page_state(10)], [{"edit": {"result": "Success"}}])
+    result = add_category_to_file(client, "token", "File:Example.jpg", full, "Summary")
+    check_equal("guarded edit result", result, "added")
+    check_equal("guarded edit base revision", client.post_calls[0][1]["baserevid"], "10")
+    check_equal("guarded edit safe API retries", client.post_calls[0][2],
+                SAFE_API_RETRY_CODES)
+
+    client = FakeClient([page_state(10, category_present=True)], [])
+    check_equal("already-present pre-check",
+                add_category_to_file(client, "token", "File:Example.jpg", full, "Summary"),
+                "already")
+    check_equal("already-present did not edit", len(client.post_calls), 0)
+
+    conflict = MediaWikiAPIError({"code": "editconflict", "info": "Changed"})
+    client = FakeClient(
+        [page_state(10), page_state(11)],
+        [conflict, {"edit": {"result": "Success"}}],
+    )
+    check_equal("conflict re-check result",
+                add_category_to_file(client, "token", "File:Example.jpg", full, "Summary"),
+                "added")
+    check_equal("conflict retry fresh revision", client.post_calls[1][1]["baserevid"], "11")
+
+    client = FakeClient(
+        [page_state(10), page_state(11, category_present=True)],
+        [conflict],
+    )
+    check_equal("conflict resolved by another editor",
+                add_category_to_file(client, "token", "File:Example.jpg", full, "Summary"),
+                "already")
+    check_equal("conflict-present did not retry edit", len(client.post_calls), 1)
+
+    lost = urllib.error.URLError("simulated lost edit response")
+    client = FakeClient([page_state(10)], [lost])
+    try:
+        add_category_to_file(client, "token", "File:Example.jpg", full, "Summary")
+        raise AssertionError("lost edit response was ignored")
+    except urllib.error.URLError:
+        pass
+    check_equal("unknown edit outcome not retried", len(client.post_calls), 1)
 
 def check_atomic_write_text():
     with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
@@ -2847,6 +4546,21 @@ def write_and_parse_sample(review_format, suffix):
         text = open(path, encoding="utf-8").read()
         if review_path_arg(path) not in text:
             raise AssertionError("review command did not include the review path")
+        parsed_items = parse_review_items(path)
+        parsed_example = next(item for item in parsed_items
+                              if item["title"] == "File:Example.jpg")
+        check_equal("review article title", parsed_example["articles"][0]["title"],
+                    "Example")
+        check_equal("review article url", parsed_example["articles"][0]["url"],
+                    "https://en.wikipedia.org/wiki/Example")
+        check_equal("review caption", parsed_example["caption"],
+                    "Test Person at an example event.")
+        captionless_text = re.sub(r"^\s+caption:.*\n", "", text, flags=re.M)
+        atomic_write_text(path, captionless_text)
+        captionless_example = next(item for item in parse_review_items(path)
+                                   if item["title"] == "File:Example.jpg")
+        check_equal("legacy review without caption", captionless_example["caption"], "")
+        atomic_write_text(path, text)
         text = text.replace("- [ ] File:Example.jpg", "- [X] File:Example.jpg")
         text = text.replace("- [ ] File:Ambiguous.jpg", "- [X] File:Ambiguous.jpg")
         open(path, "w", encoding="utf-8").write(text)
@@ -3028,7 +4742,7 @@ def check_guided_menu_copy_matrix():
         settings = (
             "Settings",
             "settings",
-            "Save your name, Commons account, and category for photos you took.",
+            "Save your name, Wikimedia Commons account, and category for photos you took.",
         )
         start_over = (
             "Start over with a different photographer",
@@ -3038,7 +4752,7 @@ def check_guided_menu_copy_matrix():
         setup = (
             "Set up Credit Check",
             "settings",
-            "Save your Commons account, credited name, and category.",
+            "Save your Wikimedia Commons account, credited name, and category.",
         )
         find = (
             "Find your photos on Wikipedia",
@@ -3068,7 +4782,7 @@ def check_guided_menu_copy_matrix():
         add = (
             "Add selected photos to your photographer category page on Wikimedia Commons",
             "add",
-            "Preview the Commons edits, then add them.",
+            "Preview the Wikimedia Commons edits, then add them.",
         )
         cases = [
             ("setup needed",
@@ -3136,10 +4850,10 @@ def check_guided_copy_messages():
         raise AssertionError("bot password intro lost account ownership explanation")
     if "still edits as YourName" not in intro:
         raise AssertionError("bot password intro lost edit attribution explanation")
-    if "Do not use your main Commons password." not in intro:
+    if "Do not use your main Wikimedia Commons password." not in intro:
         raise AssertionError("bot password intro lost main-password warning")
     if "Log in there with your normal Wikimedia Commons username and password." not in intro:
-        raise AssertionError("bot password intro lost Commons login step")
+        raise AssertionError("bot password intro lost Wikimedia Commons login step")
     if "Come back here and paste them below." not in intro:
         raise AssertionError("bot password intro lost return-to-tool step")
 
@@ -3286,9 +5000,9 @@ def check_interactive_settings_core_only():
             })
             prompts = []
             answers = {
-                "Commons username": "NewUser",
-                "Your name as it's credited on Commons": "New Author",
-                "Commons category for photos you took": "Photographs by New Author",
+                "Wikimedia Commons username": "NewUser",
+                "Your name as it's credited on Wikimedia Commons": "New Author",
+                "Wikimedia Commons category for photos you took": "Photographs by New Author",
             }
 
             def fake_prompt(label, default=None, required=False):
@@ -3300,9 +5014,9 @@ def check_interactive_settings_core_only():
             interactive_settings()
             prefs = local_preferences()
             check_equal("settings prompts", [p[0] for p in prompts], [
-                "Commons username",
-                "Your name as it's credited on Commons",
-                "Commons category for photos you took",
+                "Wikimedia Commons username",
+                "Your name as it's credited on Wikimedia Commons",
+                "Wikimedia Commons category for photos you took",
             ])
             check_equal("settings saved username", prefs.get("username"), "NewUser")
             check_equal("settings saved author", prefs.get("author"), "New Author")
@@ -3351,9 +5065,9 @@ def check_interactive_start_over():
             confirmations = []
             scan_calls = []
             answers = {
-                "Commons username": "NewUser",
-                "Your name as it's credited on Commons": "New Author",
-                "Commons category for photos you took": "Photographs by New Author",
+                "Wikimedia Commons username": "NewUser",
+                "Your name as it's credited on Wikimedia Commons": "New Author",
+                "Wikimedia Commons category for photos you took": "Photographs by New Author",
             }
 
             def fake_confirm(label, default=False):
@@ -3377,9 +5091,9 @@ def check_interactive_start_over():
                 False,
             )])
             check_equal("start-over prompts", [p[0] for p in prompts], [
-                "Commons username",
-                "Your name as it's credited on Commons",
-                "Commons category for photos you took",
+                "Wikimedia Commons username",
+                "Your name as it's credited on Wikimedia Commons",
+                "Wikimedia Commons category for photos you took",
             ])
             check_equal("start-over saved username", prefs.get("username"), "NewUser")
             check_equal("start-over saved author", prefs.get("author"), "New Author")
@@ -3477,8 +5191,8 @@ def check_interactive_by_scan_identity_prompts():
             scan_calls = []
             prompts = []
             answers = {
-                "Commons username": "PromptedUser",
-                "Your name as it's credited on Commons": "Prompted Author",
+                "Wikimedia Commons username": "PromptedUser",
+                "Your name as it's credited on Wikimedia Commons": "Prompted Author",
             }
 
             def fake_prompt_missing(label, default=None, required=False):
@@ -3490,8 +5204,8 @@ def check_interactive_by_scan_identity_prompts():
             sys.stdout = io.StringIO()
             interactive_scan("by")
             check_equal("missing identity prompts", [p[0] for p in prompts], [
-                "Commons username",
-                "Your name as it's credited on Commons",
+                "Wikimedia Commons username",
+                "Your name as it's credited on Wikimedia Commons",
             ])
             check_equal("missing by-scan calls", len(scan_calls), 1)
             args = scan_calls[0]
@@ -3648,7 +5362,7 @@ def check_interactive_of_scan_onboarding():
 
             no_qid_prompts = []
             no_qid_answers = {
-                "Commons category for photos of you": "Saved Author",
+                "Wikimedia Commons category for photos of you": "Saved Author",
                 "Choose": "2",
             }
 
@@ -3667,7 +5381,7 @@ def check_interactive_of_scan_onboarding():
             if "qid" in prefs or "of_category" in prefs:
                 raise AssertionError("blank of-scan saved portrait settings")
             check_equal("of scan prompts without qid", [p[0] for p in no_qid_prompts], [
-                "Commons category for photos of you",
+                "Wikimedia Commons category for photos of you",
                 "Choose",
             ])
             check_equal("of-category default without qid", no_qid_prompts[0][1],
@@ -3677,7 +5391,7 @@ def check_interactive_of_scan_onboarding():
 
             with_qid_prompts = []
             with_qid_answers = {
-                "Commons category for photos of you": "Portrait Category",
+                "Wikimedia Commons category for photos of you": "Portrait Category",
                 "Choose": "1",
             }
 
@@ -3708,7 +5422,7 @@ def check_interactive_of_scan_onboarding():
                         prefs.get("of_category"), "Portrait Category")
             check_equal("of scan saved qid", prefs.get("qid"), "Q12345")
             check_equal("of scan prompts with qid", [p[0] for p in with_qid_prompts], [
-                "Commons category for photos of you",
+                "Wikimedia Commons category for photos of you",
                 "Choose",
             ])
     finally:
@@ -3741,7 +5455,7 @@ def check_review_gallery_html():
     item = {
         "title": "File:Example photo.jpg",
         "label": "Example photo.jpg",
-        "uses": 2,
+        "uses": 9,
         "target": "Photographs by Test Person",
         "checked": True,
     }
@@ -3750,7 +5464,7 @@ def check_review_gallery_html():
             "Test gallery",
             "Example photo.jpg",
             "Special:FilePath/Example_photo.jpg?width=320",
-            "Open on Commons",
+            "Open on Wikimedia Commons",
             "Selected"):
         if needle not in text:
             raise AssertionError("gallery missing %r" % needle)
@@ -3763,22 +5477,111 @@ def check_web_review_html():
         "uses": 2,
         "target": "Photographs by Test Person",
         "checked": False,
+        "caption": "Test Person at an example event.",
+        "articles": [
+            {"title": "Example article", "url": "https://en.wikipedia.org/wiki/Example_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Another article", "url": "https://en.wikipedia.org/wiki/Another_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Third article", "url": "https://en.wikipedia.org/wiki/Third_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Fourth article", "url": "https://en.wikipedia.org/wiki/Fourth_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Fifth article", "url": "https://en.wikipedia.org/wiki/Fifth_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Sixth article", "url": "https://en.wikipedia.org/wiki/Sixth_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Seventh article", "url": "https://en.wikipedia.org/wiki/Seventh_article",
+             "wiki": "en.wikipedia.org", "lang": "en"},
+            {"title": "Artículo de ejemplo", "url": "https://es.wikipedia.org/wiki/Art%C3%ADculo_de_ejemplo",
+             "wiki": "es.wikipedia.org", "lang": "es"},
+            {"title": "Beispielartikel", "url": "https://de.wikipedia.org/wiki/Beispielartikel",
+             "wiki": "de.wikipedia.org", "lang": "de"},
+        ],
     }
     text = web_review_html("review.md", [item], ambiguous_count=2)
     for needle in (
-            "Choose photos to add to Category",
+            "Photos credited to you",
+            "Credit Check — Photos credited to you",
+            '<h1 class="product-title" id="product-title">Credit Check</h1>',
+            "A free tool from <a class=\"wikiportraits-link\"",
+            "font-size: 17px",
+            "width: 34px",
+            "margin-top: 22px",
+            "https://www.wikiportraits.org/",
+            "wikiportraits-logo",
+            "Your selection",
+            "Your photographer category",
+            "target-card",
+            'id="target-card"',
+            "Open on Wikimedia Commons",
+            "white-space: nowrap",
+            "commonsCategoryUrl",
+            'const photographerPrefix = "Photographs by ";',
+            'document.createElement("br")',
+            "targetCard.href = commonsCategoryUrl(targets[0])",
+            "action-rail",
+            "selection-flow",
             "window.CREDIT_CHECK_ITEMS",
             "window.CREDIT_CHECK_REVIEW_ARG",
             "window.CREDIT_CHECK_AMBIGUOUS_COUNT = 2",
             "window.CREDIT_CHECK_INITIAL_MODE",
             "window.CREDIT_CHECK_GUIDED",
             "a category before",
-            "Photos you can add to this category",
+            "Choose photos to add",
+            "Your photo appears in",
+            "photo-caption",
+            "photo-title",
+            "photo-image",
+            "grid-template-columns: repeat(3, minmax(0, 1fr))",
+            "family=Instrument+Sans:wght@400..800&amp;display=swap",
+            'font: 15px/1.45 "Instrument Sans"',
+            "min-height: 144px",
+            "font-size: 28px",
+            "font-weight: 800",
+            "letter-spacing: -0.045em",
+            "-webkit-line-clamp: 3",
+            "object-fit: cover",
+            "object-position: 50% 20%",
+            ".thumb::before",
+            ".thumb::after",
+            "border-top: 1px solid rgba(88, 211, 148, 0.98)",
+            "captionLine",
+            "filenamePhotoTitle",
+            "photoTitle",
+            '${captionLine}\n      <div class="photo-image">',
+            "return [item.caption, item.label",
+            "Example article",
+            "ENGLISH_ARTICLE_LIMIT = 5",
+            "View all ${englishArticles.length} English-language Wikipedia articles",
+            "+ ${hiddenEnglishCount} more",
+            "article-more-count",
+            "article-dialog-action",
+            "Plus ${escapeHtml(moreWikipediaPages",
+            "article-disclosure",
+            'id="article-dialog"',
+            'aria-haspopup="dialog"',
+            "article-dialog-list",
+            "columns: 5 190px",
+            "articleDialog.showModal()",
+            'articleDialog.addEventListener("close"',
+            "Test Person at an example event.",
+            "articleDialogDescription",
+            "item.caption",
+            "language-groups",
+            "Photo details",
+            "select-control",
+            "syncThumbnailState",
+            "reconcileThumbnails",
+            "Thumbnail unavailable — open on Wikimedia Commons",
+            'image.loading = "eager"',
+            "Filter by filename, article, category",
             "Special:FilePath/Example_photo.jpg?width=420",
             "Select shown",
             "data-mode=\"selected\"",
-            "Commons edits",
-            "Select photos to see the category edits here.",
+            "Wikimedia Commons edits",
+            "Review exact Wikimedia Commons edits",
+            "Your choices are saved. Review the exact edits below",
             "credit-check commit ${reviewArg} --go",
             "Shortcuts: / search, Space select, o open",
             'data-action="done"',
@@ -3795,9 +5598,19 @@ def check_web_review_html():
         if needle not in text:
             raise AssertionError("web review missing %r" % needle)
     if 'data-action="preview"' in text or 'data-action="hide-preview"' in text:
-        raise AssertionError("web review should show Commons edits live without preview buttons")
+        raise AssertionError("web review should show Wikimedia Commons edits live without preview buttons")
+    if "Also used in" in text:
+        raise AssertionError("web review should distinguish English articles from other-language pages")
+    if "Plus ${extraEnglish.length} more English-language Wikipedia" in text:
+        raise AssertionError("web review should offer one complete English article list")
+    if "together in one place" in text:
+        raise AssertionError("web review should keep the article dialog description concise")
+    if "Every English-language Wikipedia article using this photo." in text:
+        raise AssertionError("web review should show photo metadata instead of generic dialog copy")
     if 'data-action="save"' in text or 'data-action="save-close"' in text:
-        raise AssertionError("web review should rely on auto-save plus one Done button")
+        raise AssertionError("web review should rely on auto-save plus Done controls")
+    if text.count('data-action="done">Done</button>') != 2:
+        raise AssertionError("web review should offer desktop and mobile Done controls")
     if "After saving" in text or "Then run:" in text or "review-path" in text:
         raise AssertionError("web review should not surface old save/path hints")
 
@@ -3823,7 +5636,7 @@ def check_commit_summary_helpers():
         sys.stdout = io.StringIO()
         print_plan(approved, "review.md", guided=True)
         plan_output = sys.stdout.getvalue()
-        if "Preview - Commons edits (nothing is edited yet):" not in plan_output:
+        if "Preview - Wikimedia Commons edits (nothing is edited yet):" not in plan_output:
             raise AssertionError("commit preview title missing")
         if "Category:Photographs by Test Person" not in plan_output:
             raise AssertionError("commit preview category header missing")
@@ -4225,7 +6038,10 @@ def cmd_self_test(args):
     run_check("review format preferences", formats, failures)
     run_check("local review-format preference file", check_review_preferences, failures)
     run_check("HTTP POST retry policy", check_retry_policy, failures)
+    run_check("version and User-Agent identity", check_version_identity, failures)
+    run_check("conflict-safe category writes", check_commit_write_safety, failures)
     run_check("atomic text writes", check_atomic_write_text, failures)
+    run_check("photo caption metadata", check_photo_caption_metadata, failures)
     run_check("authorship classification", authorship, failures)
     run_check("Markdown review write/parse", lambda: write_and_parse_sample("markdown", ".md"), failures)
     run_check("org review write/parse", lambda: write_and_parse_sample("org", ".org"), failures)
@@ -4587,10 +6403,10 @@ def interactive_scan(scan_mode="by"):
 
     username = identity_default("username", "WIKI_USERNAME")
     if not username:
-        username = prompt_text("Commons username", required=True)
+        username = prompt_text("Wikimedia Commons username", required=True)
     author = identity_default("author", "WIKI_AUTHOR")
     if not author:
-        author = prompt_text("Your name as it's credited on Commons", required=True)
+        author = prompt_text("Your name as it's credited on Wikimedia Commons", required=True)
     by_default = identity_default(
         "by_category", "WIKI_BY_CATEGORY", "Photographs by %s" % author)
     of_cat = qid = None
@@ -4598,7 +6414,7 @@ def interactive_scan(scan_mode="by"):
     if scan_mode == "of":
         by_cat = by_default
         of_cat = prompt_text(
-            "Commons category for photos of you",
+            "Wikimedia Commons category for photos of you",
             identity_default("of_category", "WIKI_OF_CATEGORY", author),
             required=True)
         qid = interactive_wikidata_qid(author)
@@ -4640,15 +6456,15 @@ def run_guided_scan(username, author, by_cat, of_cat=None, qid=None, scan_mode="
 
 def prompt_photographer_settings():
     username = prompt_text(
-        "Commons username",
+        "Wikimedia Commons username",
         identity_default("username", "WIKI_USERNAME"),
         required=True)
     author = prompt_text(
-        "Your name as it's credited on Commons",
+        "Your name as it's credited on Wikimedia Commons",
         identity_default("author", "WIKI_AUTHOR"),
         required=True)
     by_cat = prompt_text(
-        "Commons category for photos you took",
+        "Wikimedia Commons category for photos you took",
         identity_default("by_category", "WIKI_BY_CATEGORY",
                          "Photographs by %s" % author),
         required=True)
@@ -4718,7 +6534,7 @@ def interactive_menu_actions(state):
     if not state["setup_complete"]:
         primary_value = "settings"
         primary_label = "Set up Credit Check"
-        primary_desc = "Save your Commons account, credited name, and category."
+        primary_desc = "Save your Wikimedia Commons account, credited name, and category."
     elif not state["exists"]:
         primary_value = "scan_by"
         primary_label = "Find your photos on Wikipedia"
@@ -4735,7 +6551,7 @@ def interactive_menu_actions(state):
     elif state["selected"]:
         primary_value = "add"
         primary_label = "Add selected photos to your photographer category page on Wikimedia Commons"
-        primary_desc = "Preview the Commons edits, then add them."
+        primary_desc = "Preview the Wikimedia Commons edits, then add them."
     else:
         primary_value = "review"
         primary_label = "Choose photos to add"
@@ -4765,7 +6581,7 @@ def interactive_menu_actions(state):
         actions.append((
             "Settings",
             "settings",
-            "Save your name, Commons account, and category for photos you took.",
+            "Save your name, Wikimedia Commons account, and category for photos you took.",
         ))
     if state["setup_complete"] or state["exists"]:
         actions.append((
@@ -4783,8 +6599,8 @@ def interactive_menu_actions(state):
         actions += [
             ("Run local tool checks", "self_test",
              "Verify parsing, review files, routing, and retry behavior."),
-            ("Run a read-only Commons test", "smoke",
-             "Confirm Commons access without editing anything."),
+            ("Run a read-only Wikimedia Commons test", "smoke",
+             "Confirm Wikimedia Commons access without editing anything."),
         ]
     actions.append(("Quit", "quit", ""))
     return actions
@@ -4849,7 +6665,7 @@ def cmd_interactive(args):
     print("keep track of which Wikipedia articles use your photos.")
     if not setup_complete():
         print("")
-        print("First step: save your Commons account and credited name.")
+        print("First step: save your Wikimedia Commons account and credited name.")
     while True:
         choice = interactive_menu_choice()
         action = interactive_choice_action(choice)
@@ -4876,13 +6692,6 @@ def cmd_interactive(args):
 
 
 # ---------------------------------------------------------------- CLI
-
-try:
-    import importlib.metadata as _metadata
-    __version__ = _metadata.version("credit-check")
-except Exception:
-    __version__ = "1.1.6"
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -4956,7 +6765,7 @@ def main():
     st = sub.add_parser("self-test", help="run local parser and review-format checks")
     st.set_defaults(func=cmd_self_test)
 
-    sm = sub.add_parser("smoke", help="run a read-only Commons smoke test")
+    sm = sub.add_parser("smoke", help="run a read-only Wikimedia Commons smoke test")
     sm.add_argument("--review-format", choices=["markdown", "md", "org"],
                     help="review file format for the smoke review (default markdown)")
     sm.add_argument("--out", help="write smoke review to this path")
