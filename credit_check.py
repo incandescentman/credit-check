@@ -73,7 +73,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.8"
+__version__ = "1.1.9"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -1922,7 +1922,7 @@ body {
 .scope-tab {
   min-height: 54px;
   padding: 9px 13px;
-  color: var(--muted);
+  color: var(--ink);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 9px;
@@ -1930,11 +1930,20 @@ body {
   font-weight: 700;
   line-height: 1.25;
   text-align: center;
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.scope-tab-prefix {
+  display: inline-block;
+  width: 3.75em;
+  margin-right: 0.2em;
+  text-align: right;
 }
 .scope-tab:hover:not(:disabled),
 .scope-tab:focus-visible:not(:disabled) {
-  color: var(--accent-strong);
-  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  background: #fff;
+  border-color: rgba(14, 107, 69, 0.28);
+  box-shadow: 0 7px 18px -14px rgba(11, 87, 56, 0.72);
 }
 .scope-tab.active {
   color: var(--ink);
@@ -2882,7 +2891,7 @@ button.primary:focus-visible {
           <div class="picker-identity">
             <div class="title-block">
               <div class="title-row task-row">
-                <h2 class="task-title" id="screen-title">Your photos on Wikipedia</h2>
+                <h2 class="task-title" id="screen-title">Your photos on Wikipedia:</h2>
               </div>
               <div class="reach-overview">
                 <div class="scan-metrics" aria-label="Your Wikipedia reach and category progress">
@@ -2905,8 +2914,8 @@ button.primary:focus-visible {
                   </div>
                 </div>
                 <div class="scope-tabs" role="tablist" aria-label="Your photo views">
-                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections">Photos missing your Wikimedia Commons category</button>
-                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections">All your photos on Wikipedia</button>
+                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-prefix" id="missing-scope-prefix">Viewing</span> <span id="missing-scope-label">photos missing your Wikimedia Commons category</span></button>
+                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-prefix" id="all-scope-prefix">View</span> <span id="all-scope-label">all your photos on Wikipedia</span></button>
                 </div>
               </div>
               <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
@@ -2994,7 +3003,7 @@ button.primary:focus-visible {
       <div class="article-dialog-context">
         <img class="article-dialog-thumb" id="article-dialog-thumb" alt="">
         <div class="article-dialog-copy">
-          <p class="used-label">Your photo appears in</p>
+          <p class="used-label">Your photo appears in:</p>
           <h2 id="article-dialog-title" tabindex="-1"></h2>
           <p id="article-dialog-description" hidden></p>
         </div>
@@ -3043,6 +3052,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
   const missingScopeTab = document.getElementById("missing-scope-tab");
   const allScopeTab = document.getElementById("all-scope-tab");
+  const missingScopePrefix = document.getElementById("missing-scope-prefix");
+  const allScopePrefix = document.getElementById("all-scope-prefix");
+  const missingScopeText = document.getElementById("missing-scope-label");
+  const allScopeText = document.getElementById("all-scope-label");
   const screenTitle = document.getElementById("screen-title");
   const inUseCount = document.getElementById("in-use-count");
   const articleCount = document.getElementById("article-count");
@@ -3106,7 +3119,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let selectionRevision = 0;
   let articleDialogOpener = null;
 
-  screenTitle.textContent = "Your photos on Wikipedia";
+  screenTitle.textContent = "Your photos on Wikipedia:";
   const metricValues = [
     scanMetrics.in_use_total,
     scanMetrics.article_total,
@@ -3371,7 +3384,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         </a>
       </div>
       <div class="photo-content">
-        <p class="used-label">Your photo appears in</p>
+        <p class="used-label">Your photo appears in:</p>
         ${articleHtml(item)}
         <details class="photo-details">
           <summary>Photo details</summary>
@@ -3426,8 +3439,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function renderScopeButtons() {
-    missingScopeTab.textContent = `${currentScope === "missing" ? "Viewing" : "View"} ${missingScopeLabel}`;
-    allScopeTab.textContent = `${currentScope === "all" ? "Viewing" : "View"} ${allScopeLabel}`;
+    missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View";
+    allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View";
+    missingScopeText.textContent = missingScopeLabel;
+    allScopeText.textContent = allScopeLabel;
     scopeButtons.forEach((button) => {
       const active = button.dataset.scope === currentScope;
       button.classList.toggle("active", active);
@@ -6192,7 +6207,7 @@ def check_web_review_html():
         "review.md", [item], ambiguous_count=2, scan_metrics=scan_metrics,
         all_photos=[item, categorized_item])
     for needle in (
-            "Your photos on Wikipedia",
+            "Your photos on Wikipedia:",
             "Credit Check — Your photos on Wikipedia",
             '<h1 class="product-title" id="product-title">Credit Check</h1>',
             "A free tool from <a class=\"wikiportraits-link\"",
@@ -6228,7 +6243,10 @@ def check_web_review_html():
             'data-scope="all"',
             "photos missing your Wikimedia Commons category",
             "all ${allPhotosTotal.toLocaleString(\"en-US\")} of your photos on Wikipedia",
-            '${currentScope === "missing" ? "Viewing" : "View"}',
+            'missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View"',
+            'allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View"',
+            ".scope-tab-prefix {",
+            "width: 3.75em",
             "all-photos-view",
             '${readOnly ? " read-only" : ""}',
             ".picker-workspace {",
@@ -6251,7 +6269,7 @@ def check_web_review_html():
             "photos ready to review below",
             "a category before",
             "Choose photos to add",
-            "Your photo appears in",
+            "Your photo appears in:",
             "photo-caption",
             "photo-title",
             "photo-image",
