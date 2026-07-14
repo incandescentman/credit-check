@@ -5,6 +5,9 @@ review.org
 # Local per-folder settings (holds your username, credited name, QID)
 .credit-check.json
 
+# Generated data for the read-only all-photos gallery
+.credit-check-all-photos.json
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

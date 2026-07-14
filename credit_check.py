@@ -73,7 +73,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -284,7 +284,7 @@ def fetch_details(cl, titles, by_cat, of_cat):
         batch = titles[i:i + TITLE_BATCH]
         base = {"action": "query", "titles": "|".join(batch),
                 "prop": "categories|globalusage|imageinfo|revisions",
-                "cllimit": "500", "clshow": "!hidden",
+                "cllimit": "500", "clprop": "hidden",
                 "iiprop": "user|extmetadata",
                 "iiextmetadatafilter": "ImageDescription",
                 "iiextmetadatalanguage": "en",
@@ -310,9 +310,11 @@ def fetch_details(cl, titles, by_cat, of_cat):
                 content = (rev.get("slots", {}).get("main", {}) or {}).get("*", "")
                 if content: rec["text"] = content
                 for c in p.get("categories", []):
-                    rec["cats"].add(c["title"])
-                    if c["title"] == by_full: rec["in_by"] = True
-                    if of_full and c["title"] == of_full: rec["in_of"] = True
+                    category = c["title"]
+                    if "hidden" not in c:
+                        rec["cats"].add(category)
+                    if category == by_full: rec["in_by"] = True
+                    if of_full and category == of_full: rec["in_of"] = True
                 for u in p.get("globalusage", []):
                     if u.get("ns") == "0" and u["wiki"].endswith("wikipedia.org"):
                         rec["wp"][u["wiki"] + "|" + u["title"]] = {
@@ -379,13 +381,23 @@ def name_as_subject(text, author):
     actx = author_context(text)
     return name_matches(text, author) and not name_matches(actx, author)
 
+def record_kind(rec, username, author, of_cat, depicts):
+    """Return by/of/ambiguous based on credit or depicts evidence."""
+    if is_by(rec["text"], username, author):
+        return "by"
+    if of_cat and rec["pageid"] in depicts:
+        return "of"
+    return "ambiguous"
+
+
 def route_record(rec, username, author, of_cat, depicts):
     """Return by/of/ambiguous for missing-category work, or None if already done."""
-    if is_by(rec["text"], username, author):
+    kind = record_kind(rec, username, author, of_cat, depicts)
+    if kind == "by":
         return "by" if not rec["in_by"] else None
-    if of_cat and rec["pageid"] in depicts:
+    if kind == "of":
         return "of" if not rec["in_of"] else None
-    return "ambiguous"
+    return kind
 
 
 # ---------------------------------------------------------------- derivative tracing
@@ -513,6 +525,27 @@ def sorted_wikipedia_uses(wp):
         wikipedia_article_title(use),
     ))
 
+
+def wikipedia_reach_metrics(records):
+    """Aggregate distinct photos, article pages, and Wikipedia editions."""
+    records = list(records)
+    article_keys = {
+        key
+        for rec in records
+        for key in rec.get("all_wp", rec["wp"])
+    }
+    wikipedias = {
+        use["wiki"]
+        for rec in records
+        for use in rec.get("all_wp", rec["wp"]).values()
+    }
+    return {
+        "in_use_total": len(records),
+        "article_total": len(article_keys),
+        "wikipedia_total": len(wikipedias),
+    }
+
+
 def wikipedia_article_title(use):
     # MediaWiki commonly returns database-form titles with underscores. Keep
     # those in URLs, but present the article name the way Wikipedia does.
@@ -544,6 +577,8 @@ def org_use_line(use):
 
 REVIEW_FORMAT_ENV = "CREDIT_CHECK_REVIEW_FORMAT"
 PREFERENCE_FILE = ".credit-check.json"
+ALL_PHOTOS_CACHE_FILE = ".credit-check-all-photos.json"
+ALL_PHOTOS_CACHE_VERSION = 1
 PHOTOGRAPHER_PREF_KEYS = (
     "username", "author", "by_category", "of_category", "qid",
 )
@@ -648,7 +683,12 @@ def reset_review_paths():
 
 def clear_review_files():
     removed = []
-    for path in reset_review_paths():
+    paths = reset_review_paths()
+    cache_paths = {
+        all_photos_cache_path(path)
+        for path in paths
+    }
+    for path in paths + sorted(cache_paths):
         if not (os.path.exists(path) or os.path.islink(path)):
             continue
         if os.path.isdir(path) and not os.path.islink(path):
@@ -709,6 +749,85 @@ def sort_review_items(d):
 def review_path_arg(path):
     return shlex.quote(path)
 
+def all_photos_cache_path(review):
+    return os.path.join(
+        os.path.dirname(os.path.abspath(review)),
+        ALL_PHOTOS_CACHE_FILE,
+    )
+
+def all_photos_item(title, rec, target, line):
+    uses = sorted_wikipedia_uses(rec.get("all_wp", rec.get("wp", {})))
+    return {
+        "line": line,
+        "title": title,
+        "label": title[5:] if title.startswith("File:") else title,
+        "target": target,
+        "checked": False,
+        "uses": len(uses),
+        "articles": [
+            {
+                "wiki": use.get("wiki", ""),
+                "lang": use.get("lang", ""),
+                "title": wikipedia_article_title(use),
+                "url": wikipedia_article_url(use),
+            }
+            for use in uses
+        ],
+        "caption": rec.get("caption", ""),
+    }
+
+def write_all_photos_cache(review, gallery_records, review_titles):
+    ordered = sorted(
+        gallery_records,
+        key=lambda entry: (
+            -len(entry[1].get("all_wp", entry[1].get("wp", {}))),
+            entry[0],
+        ),
+    )
+    payload = {
+        "version": ALL_PHOTOS_CACHE_VERSION,
+        "review_titles": sorted(review_titles),
+        "items": [
+            all_photos_item(title, rec, target, -(index + 1))
+            for index, (title, rec, target) in enumerate(ordered)
+        ],
+    }
+    atomic_write_text(
+        all_photos_cache_path(review),
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+def load_all_photos_cache(review, review_items):
+    try:
+        with open(all_photos_cache_path(review), encoding="utf-8") as f:
+            payload = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != ALL_PHOTOS_CACHE_VERSION:
+        return None
+    expected_titles = sorted(item["title"] for item in review_items)
+    if payload.get("review_titles") != expected_titles:
+        return None
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list):
+        return None
+    items = []
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict) or not isinstance(item.get("title"), str):
+            return None
+        articles = item.get("articles", [])
+        if not isinstance(articles, list):
+            return None
+        normalized = dict(item)
+        normalized["line"] = -(index + 1)
+        normalized["checked"] = False
+        normalized["label"] = item.get("label") or commons_file_name(item["title"])
+        normalized["uses"] = item.get("uses") if isinstance(item.get("uses"), int) else None
+        normalized["articles"] = articles
+        normalized["caption"] = item.get("caption", "")
+        items.append(normalized)
+    return items
+
 def markdown_item_block(title, rec):
     name = title[5:] if title.startswith("File:") else title
     url = "https://commons.wikimedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
@@ -756,6 +875,12 @@ def write_markdown(by_list, of_list, amb_list, meta, path):
     include_of = meta.get("include_of", True)
     include_ambiguous = meta.get("include_ambiguous", True)
     L.append("# Category review - %s" % meta["author"])
+    L.append("<!-- credit-check-metrics: %s -->" % json.dumps({
+        "article_total": meta.get("article_total"),
+        "in_use_total": meta.get("in_use_total"),
+        "missing_category_total": meta.get("missing_category_total"),
+        "wikipedia_total": meta.get("wikipedia_total"),
+    }, sort_keys=True))
     L.append("")
     L.append("Pick photos in the browser:")
     L.append("")
@@ -797,6 +922,12 @@ def write_org(by_list, of_list, amb_list, meta, path):
     include_ambiguous = meta.get("include_ambiguous", True)
     L.append("#+TITLE: Category review — %s" % meta["author"])
     L.append("#+STARTUP: content")
+    L.append("#+CREDIT_CHECK_METRICS: %s" % json.dumps({
+        "article_total": meta.get("article_total"),
+        "in_use_total": meta.get("in_use_total"),
+        "missing_category_total": meta.get("missing_category_total"),
+        "wikipedia_total": meta.get("wikipedia_total"),
+    }, sort_keys=True))
     L.append("")
     L.append("# Pick photos in the browser:")
     L.append("#   credit-check review %s" % review_path_arg(path))
@@ -844,6 +975,10 @@ ITEM_HEAD_RE = re.compile(r"^\s*(?:##|\*\*)\s+\[(\d+)\]\s+(.+?)\s*$")
 MD_USE_RE = re.compile(r"^\s+used in:\s+\[((?:\\.|[^]])*)\]\((https?://\S+)\)\s*$")
 ORG_USE_RE = re.compile(r"^\s+used in:\s+\[\[(https?://[^]]+)\]\[((?:\\.|[^]])*)\]\]\s*$")
 CAPTION_RE = re.compile(r"^\s+caption:\s*(.*?)\s*$", re.I)
+REVIEW_METRICS_RE = re.compile(
+    r"(?:credit-check-metrics:|#\+CREDIT_CHECK_METRICS:)\s*(\{.*\})",
+    re.I,
+)
 
 def article_from_review_link(url, label):
     parsed = urllib.parse.urlparse(url)
@@ -943,6 +1078,31 @@ def parse_review_items(path):
             items.append(current_item)
             item_label, item_uses = None, None
     return items
+
+
+def review_scan_metrics(path, fallback_missing=None):
+    """Return scan-level in-use and missing-category photo totals from a review."""
+    metrics = {
+        "article_total": None,
+        "in_use_total": None,
+        "missing_category_total": fallback_missing,
+        "wikipedia_total": None,
+    }
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            match = REVIEW_METRICS_RE.search(line)
+            if not match:
+                continue
+            try:
+                parsed = json.loads(match.group(1))
+            except (TypeError, ValueError):
+                break
+            for key in metrics:
+                value = parsed.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    metrics[key] = value
+            break
+    return metrics
 
 def review_section_context(path):
     """Infer what kind of scan produced a review from its generated headings."""
@@ -1110,24 +1270,41 @@ def review_items_signature(items):
             for item in items]
 
 def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
-                    guided=False):
+                    guided=False, scan_metrics=None, all_photos=None,
+                    initial_scope="missing"):
     if initial_mode not in ("all", "selected", "unselected"):
         initial_mode = "all"
+    if initial_scope not in ("missing", "all"):
+        initial_scope = "missing"
     items_json = json.dumps(web_review_payload(approvable), ensure_ascii=True).replace(
         "</", "<\\/")
+    all_photos_available = all_photos is not None
+    all_photos_json = json.dumps(
+        web_review_payload(all_photos or []), ensure_ascii=True).replace("</", "<\\/")
+    all_photos_available_json = json.dumps(all_photos_available)
     review_json = json.dumps(os.path.abspath(review), ensure_ascii=True).replace(
         "</", "<\\/")
     review_arg_json = json.dumps(review_path_arg(review), ensure_ascii=True).replace(
         "</", "<\\/")
     ambiguous_json = json.dumps(ambiguous_count)
+    metrics = {
+        "article_total": None,
+        "in_use_total": None,
+        "missing_category_total": len(approvable),
+        "wikipedia_total": None,
+    }
+    if scan_metrics:
+        metrics.update(scan_metrics)
+    metrics_json = json.dumps(metrics, ensure_ascii=True).replace("</", "<\\/")
     initial_mode_json = json.dumps(initial_mode)
+    initial_scope_json = json.dumps(initial_scope)
     guided_json = json.dumps(bool(guided))
     return """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Credit Check — Photos credited to you</title>
+<title>Credit Check — Your photos on Wikipedia</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..800&amp;display=swap">
@@ -1610,13 +1787,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .app-shell {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
-  gap: 24px;
   width: min(1560px, calc(100% - 48px));
   margin: 0 auto;
   padding: 24px 0 40px;
-  align-items: start;
 }
 .picker-shell {
   min-width: 0;
@@ -1626,26 +1799,32 @@ body {
   border-radius: 22px;
   box-shadow: 0 22px 58px -32px rgba(21, 23, 28, 0.36), 0 2px 8px rgba(21, 23, 28, 0.05);
 }
-.picker-shell header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
+.picker-shell > .product-header {
+  position: static;
+  padding: 22px 24px 0;
   background: rgba(255, 255, 255, 0.96);
-  border-bottom-color: var(--line);
+  border-bottom: 0;
   box-shadow: none;
-  backdrop-filter: blur(16px);
 }
-.picker-shell .topbar,
+.picker-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  align-items: stretch;
+}
+.picker-content {
+  min-width: 0;
+}
+.picker-controls,
 .picker-shell .picker-main {
   max-width: none;
   margin: 0;
   padding-left: 24px;
   padding-right: 24px;
 }
-.picker-shell .topbar {
-  gap: 12px;
-  padding-top: 22px;
+.picker-controls {
+  padding-top: 0;
   padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
 }
 .picker-main {
   padding-top: 22px;
@@ -1662,6 +1841,8 @@ body {
   justify-content: space-between;
   gap: 28px;
   flex-wrap: nowrap;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
 }
 .product-title {
   margin: 0;
@@ -1717,14 +1898,140 @@ body {
   text-transform: uppercase;
 }
 .task-row {
-  margin-top: 22px;
+  margin-top: 26px;
 }
 .task-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 24px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.015em;
+}
+.scope-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-self: start;
+  gap: 5px;
+  width: 100%;
+  margin: 0;
+  padding: 5px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+}
+.scope-tab {
+  min-height: 54px;
+  padding: 9px 13px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+}
+.scope-tab:hover:not(:disabled),
+.scope-tab:focus-visible:not(:disabled) {
+  color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.72);
+}
+.scope-tab.active {
+  color: var(--ink);
+  background: #fff;
+  border-color: rgba(14, 107, 69, 0.2);
+  box-shadow: 0 5px 18px -14px rgba(11, 87, 56, 0.65);
+}
+.scope-tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+.scan-metrics {
+  width: min(100%, 540px);
+  margin: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% -30%, rgba(143, 240, 191, 0.24), transparent 52%),
+    linear-gradient(145deg, #fbfdfb 0%, var(--panel-soft) 100%);
+  border: 1px solid rgba(14, 107, 69, 0.18);
+  border-radius: 16px;
+  box-shadow: 0 14px 34px -28px rgba(11, 87, 56, 0.7);
+}
+.reach-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 540px) minmax(220px, 1fr);
+  align-items: start;
+  gap: 18px;
+  margin-top: 14px;
+}
+.missing-category-statement {
+  margin: 12px 0 0;
+}
+.reach-statement {
+  padding: 12px 24px;
+  color: var(--ink);
+}
+.reach-row {
+  display: grid;
+  grid-template-columns: 46px max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 17px;
+  min-height: 92px;
+}
+.reach-row + .reach-row {
+  border-top: 1px solid rgba(14, 107, 69, 0.12);
+}
+.reach-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  color: var(--accent-strong);
+  background: rgba(14, 107, 69, 0.09);
+  border: 1px solid rgba(14, 107, 69, 0.12);
+  border-radius: 13px;
+}
+.reach-icon svg {
+  width: 26px;
+  height: 26px;
+}
+.reach-row strong {
+  color: var(--accent-strong);
+  font-size: clamp(56px, 6vw, 74px);
+  font-weight: 800;
+  line-height: 0.86;
+  letter-spacing: -0.06em;
+  font-variant-numeric: tabular-nums;
+}
+.reach-label {
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.missing-category-statement strong {
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+.missing-category-statement {
+  padding: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-align: left;
+}
+.missing-category-statement strong {
+  font-size: 20px;
+  letter-spacing: -0.025em;
+}
+.scan-metrics-note {
+  margin: 4px 0 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
 }
 .summary {
   display: inline-flex;
@@ -1747,12 +2054,51 @@ body {
   border-radius: 50%;
 }
 .result-count {
-  margin: 6px 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 14px;
 }
+.review-counts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
 .mobile-save-actions {
   display: none;
+}
+.app-shell.all-photos-view .mobile-save-actions,
+.app-shell.all-photos-view .mode-tabs,
+.app-shell.all-photos-view .bulk-tools,
+.app-shell.all-photos-view .summary {
+  visibility: hidden;
+  pointer-events: none;
+}
+.all-photos-rail {
+  display: none;
+  padding: 2px 4px 0;
+}
+.all-photos-rail h2 {
+  margin: 8px 0;
+  font-size: 21px;
+  line-height: 1.22;
+  letter-spacing: -0.02em;
+}
+.all-photos-rail p:not(.rail-kicker) {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.app-shell.all-photos-view .action-rail > :not(.all-photos-rail) {
+  display: none;
+}
+.app-shell.all-photos-view .all-photos-rail {
+  display: block;
+}
+.photo.read-only {
+  cursor: default;
 }
 input[type="search"],
 button {
@@ -2081,11 +2427,14 @@ button.primary:focus-visible {
   color: var(--muted);
 }
 .action-rail {
-  position: sticky;
-  top: 24px;
+  position: static;
   display: grid;
+  align-content: start;
   gap: 20px;
   min-width: 0;
+  padding: 24px;
+  background: linear-gradient(180deg, #fbfbf8 0%, #f7f7f2 100%);
+  border-left: 1px solid var(--line);
 }
 .rail-intro,
 .preview-panel {
@@ -2357,7 +2706,7 @@ button.primary:focus-visible {
 }
 
 @media (max-width: 1120px) {
-  .app-shell {
+  .picker-workspace {
     grid-template-columns: minmax(0, 1fr) 300px;
   }
   .grid {
@@ -2367,14 +2716,18 @@ button.primary:focus-visible {
 }
 @media (max-width: 900px) {
   .app-shell {
-    grid-template-columns: 1fr;
     width: min(100% - 28px, 760px);
     padding-top: 14px;
+  }
+  .picker-workspace {
+    grid-template-columns: 1fr;
   }
   .action-rail {
     position: static;
     grid-template-columns: 1fr 1fr;
     align-items: start;
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
   .rail-intro,
   .target-card {
@@ -2387,6 +2740,12 @@ button.primary:focus-visible {
   .mobile-save-actions {
     display: flex;
   }
+  .reach-overview {
+    grid-template-columns: 1fr;
+  }
+  .scope-tabs {
+    width: min(100%, 540px);
+  }
 }
 @media (max-width: 620px) {
   .app-shell {
@@ -2396,17 +2755,18 @@ button.primary:focus-visible {
   .picker-shell {
     border-radius: 0;
   }
-  .picker-shell .topbar,
+  .picker-shell > .product-header,
+  .picker-controls,
   .picker-shell .picker-main {
     padding-left: 14px;
     padding-right: 14px;
   }
-  .picker-shell .topbar {
+  .picker-shell > .product-header {
     padding-top: 14px;
   }
   .header-main {
-    display: flex;
-    align-items: center;
+    display: grid;
+    align-items: stretch;
   }
   .product-lockup {
     display: grid;
@@ -2427,12 +2787,39 @@ button.primary:focus-visible {
     height: 28px;
   }
   .task-row {
-    margin-top: 18px;
+    margin-top: 22px;
   }
   .task-title {
-    font-size: 17px;
+    font-size: 22px;
+  }
+  .reach-statement {
+    padding: 8px 14px;
+  }
+  .reach-row {
+    grid-template-columns: 34px max-content minmax(0, 1fr);
+    gap: 10px;
+    min-height: 74px;
+  }
+  .reach-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+  }
+  .reach-icon svg {
+    width: 21px;
+    height: 21px;
+  }
+  .reach-row strong {
+    font-size: 46px;
+  }
+  .reach-label {
+    font-size: 15px;
+  }
+  .mobile-save-actions {
+    justify-content: flex-end;
   }
   .mobile-save-actions button {
+    flex: 0 0 auto;
     min-width: 76px;
   }
   .grid {
@@ -2482,20 +2869,52 @@ button.primary:focus-visible {
 <body>
 <div class="app-shell">
   <section class="picker-shell" aria-labelledby="product-title screen-title">
-    <header>
-      <div class="topbar">
+    <header class="product-header">
+      <div class="product-lockup">
+        <h1 class="product-title" id="product-title">Credit Check</h1>
+        <span class="product-credit">A free tool from <a class="wikiportraits-link" href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer"><span>WikiPortraits</span><img class="wikiportraits-logo" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt=""></a></span>
+      </div>
+    </header>
+    <div class="picker-workspace">
+      <div class="picker-content">
+        <section class="picker-controls" aria-labelledby="screen-title">
         <div class="header-main">
           <div class="picker-identity">
             <div class="title-block">
-              <div class="product-lockup">
-                <h1 class="product-title" id="product-title">Credit Check</h1>
-                <span class="product-credit">A free tool from <a class="wikiportraits-link" href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer"><span>WikiPortraits</span><img class="wikiportraits-logo" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt=""></a></span>
-              </div>
               <div class="title-row task-row">
-                <h2 class="task-title" id="screen-title">Photos credited to you</h2>
+                <h2 class="task-title" id="screen-title">Your photos on Wikipedia</h2>
+              </div>
+              <div class="reach-overview">
+                <div class="scan-metrics" aria-label="Your Wikipedia reach and category progress">
+                  <div class="reach-statement" aria-live="polite">
+                  <div class="reach-row">
+                    <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-camera" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2" /><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /></svg></span>
+                    <strong id="in-use-count">—</strong>
+                    <span class="reach-label" id="photo-noun">photos</span>
+                  </div>
+                  <div class="reach-row">
+                    <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-brand-wikipedia" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.984h2" /><path d="M8 4.984h2.5" /><path d="M14.5 4.984h2.5" /><path d="M22 4.984h-2" /><path d="M4 4.984l5.455 14.516l6.545 -14.516" /><path d="M9 4.984l6 14.516l6 -14.516" /></svg></span>
+                    <strong id="article-count">—</strong>
+                    <span class="reach-label" id="article-noun">articles</span>
+                  </div>
+                  <div class="reach-row">
+                    <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-world" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" /><path d="M3.6 9h16.8" /><path d="M3.6 15h16.8" /><path d="M11.5 3a17 17 0 0 0 0 18" /><path d="M12.5 3a17 17 0 0 1 0 18" /></svg></span>
+                    <strong id="wikipedia-count">—</strong>
+                    <span class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>
+                  </div>
+                  </div>
+                </div>
+                <div class="scope-tabs" role="tablist" aria-label="Your photo views">
+                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections">Photos missing your Wikimedia Commons category</button>
+                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections">All your photos on Wikipedia</button>
+                </div>
+              </div>
+              <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
+              <p class="scan-metrics-note" id="scan-metrics-note">Distinct article pages across all Wikipedia language editions. Each photo counts once.</p>
+              <div class="review-counts">
+                <p class="result-count" id="result-count"></p>
                 <div class="summary" id="summary"></div>
               </div>
-              <p class="result-count" id="result-count"></p>
             </div>
           </div>
           <div class="save-actions mobile-save-actions">
@@ -2517,50 +2936,57 @@ button.primary:focus-visible {
           <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
           <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
         </div>
+        </section>
+        <main class="picker-main">
+          <div class="notice" id="ambiguous-note"></div>
+          <div class="empty" id="empty">No photos match this view.</div>
+          <div class="sections" id="sections" aria-label="Photos"></div>
+        </main>
       </div>
-    </header>
-    <main class="picker-main">
-      <div class="notice" id="ambiguous-note"></div>
-      <div class="empty" id="empty">No photos match this view.</div>
-      <div class="sections" id="sections" aria-label="Photos"></div>
-    </main>
-  </section>
-  <aside class="action-rail" aria-label="Selection and next step">
-    <div class="rail-intro">
-      <p class="rail-kicker">Your selection</p>
-      <h2 id="rail-state-title">Choose the photos you want to gather under your name.</h2>
-      <p id="rail-state-copy">Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.</p>
-      <div class="selection-flow" id="selection-flow" hidden>
-        <strong id="rail-selected-count"></strong>
-        <span aria-hidden="true">→</span>
-        <span id="rail-flow-target"></span>
-      </div>
-    </div>
-    <a class="target-card" id="target-card" target="_blank" rel="noreferrer">
-      <p>Your photographer category</p>
-      <h2 id="target-summary"></h2>
-      <span>One place to keep track of the Wikipedia articles using your photos.</span>
-      <span class="target-card-action">Open on Wikimedia Commons <span aria-hidden="true">↗</span></span>
-    </a>
-    <section class="preview-panel" id="preview-panel">
-      <div class="preview-header">
-        <div>
-          <p class="rail-kicker">Ready when you are</p>
-          <h2>Wikimedia Commons edits</h2>
-          <p id="preview-summary"></p>
+      <aside class="action-rail" aria-label="Selection and next step">
+        <div class="rail-intro">
+          <p class="rail-kicker">Your selection</p>
+          <h2 id="rail-state-title">Choose the photos you want to gather under your name.</h2>
+          <p id="rail-state-copy">Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.</p>
+          <div class="selection-flow" id="selection-flow" hidden>
+            <strong id="rail-selected-count"></strong>
+            <span aria-hidden="true">→</span>
+            <span id="rail-flow-target"></span>
+          </div>
         </div>
-      </div>
-      <details class="edit-receipt" id="edit-receipt" hidden>
-        <summary>Review exact Wikimedia Commons edits</summary>
-        <pre class="preview-edits" id="preview-edits"></pre>
-      </details>
-      <p class="next-command" id="next-command"></p>
-    </section>
-    <div class="rail-actions">
-      <div class="status" id="status" role="status" aria-live="polite"></div>
-      <button type="button" class="primary rail-done" data-action="done">Done</button>
+        <a class="target-card" id="target-card" target="_blank" rel="noreferrer">
+          <p>Your photographer category</p>
+          <h2 id="target-summary"></h2>
+          <span>One place to keep track of the Wikipedia articles using your photos.</span>
+          <span class="target-card-action">Open on Wikimedia Commons <span aria-hidden="true">↗</span></span>
+        </a>
+        <section class="preview-panel" id="preview-panel">
+          <div class="preview-header">
+            <div>
+              <p class="rail-kicker">Ready when you are</p>
+              <h2>Wikimedia Commons edits</h2>
+              <p id="preview-summary"></p>
+            </div>
+          </div>
+          <details class="edit-receipt" id="edit-receipt" hidden>
+            <summary>Review exact Wikimedia Commons edits</summary>
+            <pre class="preview-edits" id="preview-edits"></pre>
+          </details>
+          <p class="next-command" id="next-command"></p>
+        </section>
+        <div class="rail-actions">
+          <div class="status" id="status" role="status" aria-live="polite"></div>
+          <button type="button" class="primary rail-done" data-action="done">Done</button>
+        </div>
+        <section class="all-photos-rail" aria-label="About this gallery">
+          <p class="rail-kicker">All your photos</p>
+          <h2>Your complete Wikipedia gallery.</h2>
+          <p>This read-only view contains all <strong id="all-rail-photo-count">—</strong> photos from this scan, including photos already in your photographer category.</p>
+          <p>Switch to the missing-category tab to choose photos to add.</p>
+        </section>
+      </aside>
     </div>
-  </aside>
+  </section>
 </div>
 <dialog class="article-dialog" id="article-dialog" aria-labelledby="article-dialog-title" aria-describedby="article-dialog-description">
   <div class="article-dialog-shell">
@@ -2584,18 +3010,29 @@ button.primary:focus-visible {
 window.CREDIT_CHECK_REVIEW = __REVIEW_JSON__;
 window.CREDIT_CHECK_REVIEW_ARG = __REVIEW_ARG_JSON__;
 window.CREDIT_CHECK_ITEMS = __ITEMS_JSON__;
+window.CREDIT_CHECK_ALL_PHOTOS = __ALL_PHOTOS_JSON__;
+window.CREDIT_CHECK_ALL_PHOTOS_AVAILABLE = __ALL_PHOTOS_AVAILABLE_JSON__;
 window.CREDIT_CHECK_AMBIGUOUS_COUNT = __AMBIGUOUS_JSON__;
+window.CREDIT_CHECK_METRICS = __METRICS_JSON__;
 window.CREDIT_CHECK_INITIAL_MODE = __INITIAL_MODE_JSON__;
+window.CREDIT_CHECK_INITIAL_SCOPE = __INITIAL_SCOPE_JSON__;
 window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
 (() => {
   const reviewArg = window.CREDIT_CHECK_REVIEW_ARG;
   const ambiguousCount = window.CREDIT_CHECK_AMBIGUOUS_COUNT;
+  const scanMetrics = window.CREDIT_CHECK_METRICS;
   const guidedMode = Boolean(window.CREDIT_CHECK_GUIDED);
   const items = window.CREDIT_CHECK_ITEMS.map((item) => ({
     ...item,
     selected: Boolean(item.checked),
   }));
+  const allPhotosAvailable = Boolean(window.CREDIT_CHECK_ALL_PHOTOS_AVAILABLE);
+  const allPhotos = window.CREDIT_CHECK_ALL_PHOTOS.map((item) => ({
+    ...item,
+    selected: false,
+  }));
+  const appShell = document.querySelector(".app-shell");
   const sections = document.getElementById("sections");
   const empty = document.getElementById("empty");
   const summary = document.getElementById("summary");
@@ -2603,7 +3040,20 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const status = document.getElementById("status");
   const search = document.getElementById("search");
   const modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
+  const scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
+  const missingScopeTab = document.getElementById("missing-scope-tab");
+  const allScopeTab = document.getElementById("all-scope-tab");
   const screenTitle = document.getElementById("screen-title");
+  const inUseCount = document.getElementById("in-use-count");
+  const articleCount = document.getElementById("article-count");
+  const wikipediaCount = document.getElementById("wikipedia-count");
+  const missingCategoryCount = document.getElementById("missing-category-count");
+  const photoNoun = document.getElementById("photo-noun");
+  const articleNoun = document.getElementById("article-noun");
+  const wikipediaNoun = document.getElementById("wikipedia-noun");
+  const missingPhotoNoun = document.getElementById("missing-photo-noun");
+  const missingVerb = document.getElementById("missing-verb");
+  const scanMetricsNote = document.getElementById("scan-metrics-note");
   const ambiguousNote = document.getElementById("ambiguous-note");
   const previewSummary = document.getElementById("preview-summary");
   const previewEdits = document.getElementById("preview-edits");
@@ -2616,6 +3066,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const selectionFlow = document.getElementById("selection-flow");
   const railSelectedCount = document.getElementById("rail-selected-count");
   const railFlowTarget = document.getElementById("rail-flow-target");
+  const allRailPhotoCount = document.getElementById("all-rail-photo-count");
   const doneButtons = Array.from(document.querySelectorAll('[data-action="done"]'));
   const articleDialog = document.getElementById("article-dialog");
   const articleDialogTitle = document.getElementById("article-dialog-title");
@@ -2646,13 +3097,52 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let currentMode = ["all", "selected", "unselected"].includes(window.CREDIT_CHECK_INITIAL_MODE)
     ? window.CREDIT_CHECK_INITIAL_MODE
     : "all";
+  let currentScope = window.CREDIT_CHECK_INITIAL_SCOPE === "all" && allPhotosAvailable
+    ? "all"
+    : (items.length ? "missing" : (allPhotosAvailable ? "all" : "missing"));
   let lastFocusedLine = items.length ? items[0].line : null;
   let saveTimer = null;
   let pendingSave = false;
   let selectionRevision = 0;
   let articleDialogOpener = null;
 
-  screenTitle.textContent = "Photos credited to you";
+  screenTitle.textContent = "Your photos on Wikipedia";
+  const metricValues = [
+    scanMetrics.in_use_total,
+    scanMetrics.article_total,
+    scanMetrics.wikipedia_total,
+  ];
+  const hasReachMetrics = metricValues.every((value) => Number.isInteger(value));
+  if (hasReachMetrics) {
+    inUseCount.textContent = scanMetrics.in_use_total.toLocaleString("en-US");
+    articleCount.textContent = scanMetrics.article_total.toLocaleString("en-US");
+    wikipediaCount.textContent = scanMetrics.wikipedia_total.toLocaleString("en-US");
+    photoNoun.textContent = scanMetrics.in_use_total === 1 ? "photo" : "photos";
+    articleNoun.textContent = scanMetrics.article_total === 1 ? "article" : "articles";
+    wikipediaNoun.textContent = scanMetrics.wikipedia_total === 1
+      ? "Wikipedia language edition"
+      : "Wikipedia language editions";
+  } else {
+    scanMetricsNote.textContent = "Scan again to calculate your complete Wikipedia reach.";
+  }
+  const missingTotal = Number.isInteger(scanMetrics.missing_category_total)
+    ? scanMetrics.missing_category_total
+    : items.length;
+  missingCategoryCount.textContent = missingTotal.toLocaleString("en-US");
+  missingPhotoNoun.textContent = missingTotal === 1 ? "photo" : "photos";
+  missingVerb.textContent = missingTotal === 1 ? "is" : "are";
+  const missingScopeLabel = `${missingTotal.toLocaleString("en-US")} ${missingTotal === 1 ? "photo" : "photos"} missing your Wikimedia Commons category`;
+  const allPhotosTotal = Number.isInteger(scanMetrics.in_use_total)
+    ? scanMetrics.in_use_total
+    : allPhotos.length;
+  allRailPhotoCount.textContent = allPhotosTotal.toLocaleString("en-US");
+  const allScopeLabel = allPhotosTotal === 1
+    ? "your photo on Wikipedia"
+    : `all ${allPhotosTotal.toLocaleString("en-US")} of your photos on Wikipedia`;
+  allScopeTab.disabled = !allPhotosAvailable;
+  if (!allPhotosAvailable) {
+    allScopeTab.title = "Scan again to create your complete all-photos gallery.";
+  }
   const photographerPrefix = "Photographs by ";
   if (singleTarget && targets[0].startsWith(photographerPrefix)) {
     targetSummary.append(
@@ -2713,11 +3203,15 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       .trim();
   }
 
+  function currentItems() {
+    return currentScope === "all" ? allPhotos : items;
+  }
+
   function visibleItems() {
     const query = search.value.trim().toLowerCase();
-    return items.filter((item) => {
-      if (currentMode === "selected" && !item.selected) return false;
-      if (currentMode === "unselected" && item.selected) return false;
+    return currentItems().filter((item) => {
+      if (currentScope === "missing" && currentMode === "selected" && !item.selected) return false;
+      if (currentScope === "missing" && currentMode === "unselected" && item.selected) return false;
       return !query || itemText(item).includes(query);
     });
   }
@@ -2835,7 +3329,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function openArticleDialog(line, opener) {
-    const item = items.find((candidate) => candidate.line === line);
+    const item = currentItems().find((candidate) => candidate.line === line);
     if (!item) return;
     const englishArticles = (item.articles || []).filter(
       (article) => articleLanguage(article) === "en"
@@ -2853,7 +3347,8 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function cardHtml(item) {
-    const selectedClass = item.selected ? " selected" : "";
+    const readOnly = currentScope === "all";
+    const selectedClass = !readOnly && item.selected ? " selected" : "";
     const checked = item.selected ? " checked" : "";
     const targetLine = singleTarget ? "" : `<p class="target">Category:${escapeHtml(item.target)}</p>`;
     const selectionLabel = item.selected ? `Unselect ${item.label}` : `Select ${item.label}`;
@@ -2862,13 +3357,14 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     const captionLine = photoTitle
       ? `<div class="photo-title"><p class="photo-caption" title="${escapeHtml(photoTitle)}">${escapeHtml(photoTitle)}</p></div>`
       : "";
-    return `<article class="photo${selectedClass}" tabindex="0" data-line="${item.line}" data-file-url="${escapeHtml(item.file_url)}">
-      ${captionLine}
-      <div class="photo-image">
-        <label class="select-control" title="${escapeHtml(selectionLabel)}">
+    const selectionControl = readOnly ? "" : `<label class="select-control" title="${escapeHtml(selectionLabel)}">
           <input type="checkbox" data-line="${item.line}" aria-label="${escapeHtml(selectionLabel)}"${checked}>
           <span class="select-indicator" aria-hidden="true">✓</span>
-        </label>
+        </label>`;
+    return `<article class="photo${selectedClass}${readOnly ? " read-only" : ""}"${readOnly ? "" : ' tabindex="0"'} data-line="${item.line}" data-file-url="${escapeHtml(item.file_url)}">
+      ${captionLine}
+      <div class="photo-image">
+        ${selectionControl}
         <a class="thumb" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">
           <span class="thumb-placeholder">Loading thumbnail</span>
           <img src="${escapeHtml(item.thumb_url)}" loading="lazy" alt="">
@@ -2892,23 +3388,32 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function sectionHtml(group) {
-    const title = singleTarget ? "Choose photos to add" : `Category:${group.target}`;
+    const readOnly = currentScope === "all";
+    const title = readOnly
+      ? "All your photos on Wikipedia"
+      : singleTarget ? "Choose photos to add" : `Category:${group.target}`;
     const count = `${group.items.length} ${group.items.length === 1 ? "photo" : "photos"}`;
     const selected = group.items.filter((item) => item.selected).length;
     return `<section class="section" data-target="${escapeHtml(group.target)}">
       <div class="section-heading">
         <h2>${escapeHtml(title)}</h2>
-        <p>${selected} selected / ${count}</p>
+        <p>${readOnly ? count : `${selected} selected / ${count}`}</p>
       </div>
       <div class="grid">${group.items.map(cardHtml).join("")}</div>
     </section>`;
   }
 
   function updateSummary(visible) {
+    if (currentScope === "all") {
+      resultCount.textContent = visible.length === allPhotos.length
+        ? `${allPhotos.length} ${allPhotos.length === 1 ? "photo" : "photos"} in this gallery`
+        : `${visible.length} of ${allPhotos.length} photos showing`;
+      return;
+    }
     const selected = items.filter((item) => item.selected).length;
     summary.textContent = `${selected} selected`;
     resultCount.textContent = visible.length === items.length
-      ? `${items.length} photos found on Wikipedia`
+      ? `${items.length} photos ready to review below`
       : `${visible.length} of ${items.length} photos showing`;
   }
 
@@ -2918,6 +3423,18 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
     });
+  }
+
+  function renderScopeButtons() {
+    missingScopeTab.textContent = `${currentScope === "missing" ? "Viewing" : "View"} ${missingScopeLabel}`;
+    allScopeTab.textContent = `${currentScope === "all" ? "Viewing" : "View"} ${allScopeLabel}`;
+    scopeButtons.forEach((button) => {
+      const active = button.dataset.scope === currentScope;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    appShell.classList.toggle("all-photos-view", currentScope === "all");
+    ambiguousNote.hidden = currentScope === "all";
   }
 
   function selectedItems() {
@@ -3006,10 +3523,14 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
   function render() {
     const visible = visibleItems();
+    renderScopeButtons();
     renderModeButtons();
     updateSummary(visible);
     empty.classList.toggle("show", visible.length === 0);
-    sections.innerHTML = groupItems(visible).map(sectionHtml).join("");
+    const groups = currentScope === "all"
+      ? [{ target: "", items: visible }]
+      : groupItems(visible);
+    sections.innerHTML = groups.map(sectionHtml).join("");
     reconcileThumbnails();
     renderPreview();
   }
@@ -3099,7 +3620,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function openLine(line) {
-    const item = items.find((candidate) => candidate.line === line);
+    const item = currentItems().find((candidate) => candidate.line === line);
     if (item) window.open(item.file_url, "_blank", "noopener");
   }
 
@@ -3196,6 +3717,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     const card = event.target.closest(".photo");
     if (!card) return;
     lastFocusedLine = Number(card.dataset.line);
+    if (currentScope === "all") return;
     if (event.target.closest("a, button, input, label, summary, details")) return;
     toggleLine(Number(card.dataset.line));
   });
@@ -3206,6 +3728,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   });
 
   sections.addEventListener("keydown", (event) => {
+    if (currentScope === "all") return;
     const card = event.target.closest(".photo");
     if (!card || (event.key !== " " && event.key !== "Enter")) return;
     if (event.target.closest("a, button, input, summary, details")) return;
@@ -3241,6 +3764,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         openLine(line);
       }
     } else if (event.key === " ") {
+      if (currentScope === "all") return;
       const line = focusedLine();
       if (line !== null && document.activeElement.closest(".photo")) {
         event.preventDefault();
@@ -3289,6 +3813,18 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       render();
     });
   });
+  scopeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.disabled || button.dataset.scope === currentScope) return;
+      currentScope = button.dataset.scope;
+      currentMode = "all";
+      lastFocusedLine = currentItems().length ? currentItems()[0].line : null;
+      status.textContent = currentScope === "all"
+        ? "Showing all your photos on Wikipedia."
+        : "Showing photos missing your Wikimedia Commons category.";
+      render();
+    });
+  });
   window.addEventListener("beforeunload", flushPendingSaveBeacon);
   window.addEventListener("pagehide", flushPendingSaveBeacon);
 
@@ -3300,8 +3836,12 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 """.replace("__REVIEW_JSON__", review_json).replace(
         "__REVIEW_ARG_JSON__", review_arg_json).replace(
         "__ITEMS_JSON__", items_json).replace(
+        "__ALL_PHOTOS_JSON__", all_photos_json).replace(
+        "__ALL_PHOTOS_AVAILABLE_JSON__", all_photos_available_json).replace(
         "__AMBIGUOUS_JSON__", ambiguous_json).replace(
+        "__METRICS_JSON__", metrics_json).replace(
         "__INITIAL_MODE_JSON__", initial_mode_json).replace(
+        "__INITIAL_SCOPE_JSON__", initial_scope_json).replace(
         "__GUIDED_JSON__", guided_json)
 
 class LocalReviewServer(http.server.ThreadingHTTPServer):
@@ -3309,9 +3849,12 @@ class LocalReviewServer(http.server.ThreadingHTTPServer):
     allow_reuse_address = True
 
 def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mode="all",
-                       guided=False):
+                       guided=False, scan_metrics=None, all_photos=None,
+                       initial_scope="missing"):
     page = web_review_html(review, approvable, ambiguous_count, initial_mode,
-                           guided=guided).encode("utf-8")
+                           guided=guided, scan_metrics=scan_metrics,
+                           all_photos=all_photos,
+                           initial_scope=initial_scope).encode("utf-8")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -3461,7 +4004,7 @@ def no_approvable_review_message(ambiguous_count, guided=False):
     return "No photos to choose right now." if guided else "No photos to review."
 
 def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=False,
-                    initial_mode="all", guided=False):
+                    initial_mode="all", guided=False, initial_scope="missing"):
     if not os.path.exists(review):
         print(missing_review_message(guided))
         return False
@@ -3469,18 +4012,25 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     items = parse_review_items(review)
     approvable = [item for item in items if item["target"]]
     ambiguous_count = len([item for item in items if not item["target"]])
-    if not items:
+    scan_metrics = review_scan_metrics(review, fallback_missing=len(approvable))
+    all_photos = load_all_photos_cache(review, items)
+    if (all_photos is None and
+            scan_metrics.get("in_use_total") == len(approvable)):
+        all_photos = [dict(item, checked=False) for item in approvable]
+    if not items and not all_photos:
         print(empty_review_message(guided, review_mode_from_context(
             review_section_context(review))))
         return True
-    if not approvable:
+    if not approvable and not all_photos:
         print(no_approvable_review_message(ambiguous_count, guided))
         return True
 
     server = LocalReviewServer(
         (WEB_REVIEW_HOST, port),
         review_web_handler(review, items, approvable, ambiguous_count, initial_mode,
-                           guided=guided),
+                           guided=guided, scan_metrics=scan_metrics,
+                           all_photos=all_photos,
+                           initial_scope=initial_scope),
     )
     server.review_host = "%s:%d" % (WEB_REVIEW_HOST, server.server_address[1])
     server.review_origin = "http://%s" % server.review_host
@@ -3490,10 +4040,17 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     server.saved_count = None
     url = server.review_origin + "/"
 
-    if guided:
+    if guided and initial_scope == "all" and all_photos is not None:
+        print("Opening your complete Wikipedia photo gallery in your browser.")
+    elif guided and approvable:
         print(guided_review_open_message(len(approvable), ambiguous_count))
+    elif guided:
+        print("Opening your complete Wikipedia photo gallery in your browser.")
     else:
-        print("Opening photo picker in your browser for %d photo(s)." % len(approvable))
+        if approvable:
+            print("Opening photo picker in your browser for %d photo(s)." % len(approvable))
+        else:
+            print("Opening your complete Wikipedia photo gallery in your browser.")
         print("Review file: %s" % os.path.abspath(review))
     if guided:
         print("If the browser doesn't open, use this URL: %s" % url)
@@ -3794,11 +4351,30 @@ def cmd_scan(args):
         depicts = fetch_depicts(cl, [r["pageid"] for r in info.values()], qid)
 
     by_list, of_list, amb_list = {}, {}, {}
+    by_in_use, of_in_use, ambiguous_in_use = {}, {}, {}
+    by_missing_category, of_missing_category = set(), set()
     for title, rec in info.items():
         rec["reason"] = reasons.get(title, set())
-        wp = rec["wp"]
+        all_wp = rec["wp"]
+        if not all_wp:
+            continue
+        rec["all_wp"] = all_wp
+        kind = record_kind(rec, username, author, of_cat, depicts)
+        if kind == "by":
+            by_in_use[title] = rec
+            if not rec["in_by"]:
+                by_missing_category.add(title)
+        elif kind == "of":
+            of_in_use[title] = rec
+            if not rec["in_of"]:
+                of_missing_category.add(title)
+        else:
+            ambiguous_in_use[title] = rec
+
+        wp = all_wp
         if english_only:
-            wp = {k: v for k, v in wp.items() if v["lang"] == "en"}; rec["wp"] = wp
+            wp = {k: v for k, v in wp.items() if v["lang"] == "en"}
+        rec["wp"] = wp
         if len(wp) < min_uses:
             continue
         route = route_record(rec, username, author, of_cat, depicts)
@@ -3811,31 +4387,63 @@ def cmd_scan(args):
 
     # derivative tracing: a crop that dropped your credit but cites a source
     # file that IS yours gets promoted from ambiguous into the by-list.
-    if include_by and not no_derivatives and amb_list:
-        promoted = resolve_derivatives(cl, amb_list, username, author, depth)
+    if include_by and not no_derivatives and ambiguous_in_use:
+        promoted = resolve_derivatives(cl, ambiguous_in_use, username, author, depth)
         for title, src in promoted.items():
-            rec = amb_list.pop(title)
+            rec = ambiguous_in_use[title]
+            amb_list.pop(title, None)
+            by_in_use[title] = rec
+            if not rec["in_by"]:
+                by_missing_category.add(title)
             if rec["in_by"]:
                 continue
             rec["reason"] = set(rec.get("reason", set())) | {"derivative"}
             rec["derived_from"] = src
-            by_list[title] = rec
+            if len(rec["wp"]) >= min_uses:
+                by_list[title] = rec
         if promoted:
             print("  promoted %d derivative crop(s) via source chain." % len(promoted),
                   file=sys.stderr)
 
-    review_records = [
-        rec
+    metric_records = []
+    if include_by:
+        metric_records.extend(by_in_use.values())
+    if include_of:
+        metric_records.extend(of_in_use.values())
+    reach_metrics = wikipedia_reach_metrics(metric_records)
+    missing_category_total = (
+        (len(by_missing_category) if include_by else 0) +
+        (len(of_missing_category) if include_of else 0)
+    )
+
+    review_records_by_title = {
+        title: rec
         for review_list in (by_list, of_list, amb_list)
-        for rec in review_list.values()
-    ]
-    if review_records:
+        for title, rec in review_list.items()
+    }
+    gallery_records = []
+    if include_by:
+        gallery_records.extend(
+            (title, rec, by_cat)
+            for title, rec in by_in_use.items()
+        )
+    if include_of and of_cat:
+        gallery_records.extend(
+            (title, rec, of_cat)
+            for title, rec in of_in_use.items()
+        )
+    caption_records = {
+        title: rec
+        for title, rec, _target in gallery_records
+    }
+    caption_records.update(review_records_by_title)
+    if caption_records:
         print("  fetching English photo captions...", file=sys.stderr)
         structured_captions = fetch_english_captions(
-            cl, [rec.get("pageid") for rec in review_records])
+            cl, [rec.get("pageid") for rec in caption_records.values()])
         structured_count = 0
         fallback_count = 0
-        for rec in review_records:
+        for rec in caption_records.values():
             structured_caption = structured_captions.get(rec.get("pageid"), "")
             if structured_caption:
                 structured_count += 1
@@ -3852,8 +4460,15 @@ def cmd_scan(args):
         "include_by": include_by,
         "include_of": include_of,
         "include_ambiguous": include_ambiguous,
+        **reach_metrics,
+        "missing_category_total": missing_category_total,
     }
     write_review(by_list, of_list, amb_list, meta, out, review_format)
+    write_all_photos_cache(
+        out,
+        gallery_records,
+        review_records_by_title.keys(),
+    )
     if getattr(args, "guided", False):
         return True
     of_only_empty = include_of and not include_by and not include_ambiguous and not of_list
@@ -4278,8 +4893,15 @@ def sample_review_data():
         "wp": {"en.wikipedia.org|Example": {
             "wiki": "en.wikipedia.org", "lang": "en", "title": "Example"}},
     }
-    meta = {"author": "Test Person", "by_category": "Photographs by Test Person",
-            "of_category": None}
+    meta = {
+        "author": "Test Person",
+        "by_category": "Photographs by Test Person",
+        "of_category": None,
+        "in_use_total": 8,
+        "article_total": 21,
+        "wikipedia_total": 4,
+        "missing_category_total": 1,
+    }
     return {"File:Example.jpg": rec}, {}, {"File:Ambiguous.jpg": rec.copy()}, meta
 
 def sample_of_review_data():
@@ -4298,6 +4920,10 @@ def sample_of_review_data():
         "include_by": False,
         "include_of": True,
         "include_ambiguous": False,
+        "in_use_total": 3,
+        "article_total": 7,
+        "wikipedia_total": 2,
+        "missing_category_total": 1,
     }
     return {}, {"File:Portrait.jpg": rec}, {}, meta
 
@@ -4546,6 +5172,12 @@ def write_and_parse_sample(review_format, suffix):
         text = open(path, encoding="utf-8").read()
         if review_path_arg(path) not in text:
             raise AssertionError("review command did not include the review path")
+        check_equal("review scan metrics", review_scan_metrics(path), {
+            "article_total": 21,
+            "in_use_total": 8,
+            "missing_category_total": 1,
+            "wikipedia_total": 4,
+        })
         parsed_items = parse_review_items(path)
         parsed_example = next(item for item in parsed_items
                               if item["title"] == "File:Example.jpg")
@@ -4560,6 +5192,16 @@ def write_and_parse_sample(review_format, suffix):
         captionless_example = next(item for item in parse_review_items(path)
                                    if item["title"] == "File:Example.jpg")
         check_equal("legacy review without caption", captionless_example["caption"], "")
+        legacy_text = re.sub(
+            r"^(?:<!-- credit-check-metrics:.*-->|#\+CREDIT_CHECK_METRICS:.*)\n",
+            "", text, flags=re.M | re.I)
+        atomic_write_text(path, legacy_text)
+        check_equal("legacy review metric fallback", review_scan_metrics(path, 1), {
+            "article_total": None,
+            "in_use_total": None,
+            "missing_category_total": 1,
+            "wikipedia_total": None,
+        })
         atomic_write_text(path, text)
         text = text.replace("- [ ] File:Example.jpg", "- [X] File:Example.jpg")
         text = text.replace("- [ ] File:Ambiguous.jpg", "- [X] File:Ambiguous.jpg")
@@ -4640,9 +5282,21 @@ def check_guided_review_state():
                         "No new photos of you this time")
 
             write_review(by_list, of_list, amb_list, meta, "review.md", "markdown")
+            categorized_rec = dict(next(iter(by_list.values())))
+            write_all_photos_cache(
+                "review.md",
+                [
+                    ("File:Example.jpg", next(iter(by_list.values())),
+                     "Photographs by Test Person"),
+                    ("File:Already categorized.jpg", categorized_rec,
+                     "Photographs by Test Person"),
+                ],
+                {"File:Example.jpg", "File:Ambiguous.jpg"},
+            )
             state = review_workflow_state()
             check_equal("guided review exists", state["exists"], True)
             check_equal("guided review total", state["total"], 1)
+            check_equal("guided all-photos total", state["all_photos_total"], 2)
             check_equal("guided review ambiguous", state["ambiguous"], 1)
             check_equal("guided review selected", state["selected"], 0)
 
@@ -4661,7 +5315,7 @@ def check_guided_review_state():
 
 def check_guided_menu_dispatch():
     for value in ("self_test", "smoke", "scan_by", "scan_of", "review",
-                  "settings", "start_over", "add", "quit"):
+                  "view_all", "settings", "start_over", "add", "quit"):
         check_equal("guided dispatch %s" % value,
                     interactive_choice_action(value), value)
     for value in ("q", "quit", "exit"):
@@ -4700,15 +5354,25 @@ def check_guided_menu_visibility():
                         "Start over with a different photographer")
 
             zero = {"setup_complete": True, "exists": True, "total": 0,
-                    "selected": 0, "ambiguous": 0, "review": "review.md"}
+                    "selected": 0, "ambiguous": 0, "review": "review.md",
+                    "all_photos_total": 8}
             zero_values = [value for _label, value, _desc in interactive_menu_actions(zero)]
             if zero_values[0] != "scan_by":
                 raise AssertionError("empty review should lead with a scan, not review")
             if "review" in zero_values:
                 raise AssertionError("empty review must not offer photo review")
+            if "view_all" not in zero_values:
+                raise AssertionError("complete gallery did not appear after a caught-up scan")
+
+            no_gallery = dict(zero, all_photos_total=0)
+            no_gallery_values = [
+                value for _label, value, _desc in interactive_menu_actions(no_gallery)]
+            if "view_all" in no_gallery_values:
+                raise AssertionError("all-photo gallery appeared without preserved scan data")
 
             selected = {"setup_complete": True, "exists": True, "total": 2,
-                        "selected": 1, "ambiguous": 0, "review": "review.md"}
+                        "selected": 1, "ambiguous": 0, "review": "review.md",
+                        "all_photos_total": 8}
             selected_actions = interactive_menu_actions(selected)
             selected_labels = [label for label, _value, _desc in selected_actions]
             selected_values = [value for _label, value, _desc in selected_actions]
@@ -4784,6 +5448,11 @@ def check_guided_menu_copy_matrix():
             "add",
             "Preview the Wikimedia Commons edits, then add them.",
         )
+        view_all = (
+            "View all your photos",
+            "view_all",
+            "Open a read-only gallery of every photo from the latest scan that appears on Wikipedia.",
+        )
         cases = [
             ("setup needed",
              {"setup_complete": False, "exists": False, "total": 0,
@@ -4796,25 +5465,30 @@ def check_guided_menu_copy_matrix():
             ("caught up",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md",
-              "review_mode": "by", "of_category": None},
-             [caught_up_scan, settings, start_over, photos_of_you, quit_action]),
+              "review_mode": "by", "of_category": None,
+              "all_photos_total": 8},
+             [caught_up_scan, view_all, settings, start_over, photos_of_you, quit_action]),
             ("no photos of you",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md",
-              "review_mode": "of", "of_category": "Test Person"},
-             [search_of_again, scan_again, settings, start_over, quit_action]),
+              "review_mode": "of", "of_category": "Test Person",
+              "all_photos_total": 3},
+             [search_of_again, scan_again, view_all, settings, start_over, quit_action]),
             ("choose photos",
              {"setup_complete": True, "exists": True, "total": 2,
-              "selected": 0, "ambiguous": 1, "review": "review.md"},
-             [choose, scan_again, settings, start_over, photos_of_you, quit_action]),
+              "selected": 0, "ambiguous": 1, "review": "review.md",
+              "all_photos_total": 8},
+             [choose, scan_again, view_all, settings, start_over, photos_of_you, quit_action]),
             ("selected photos",
              {"setup_complete": True, "exists": True, "total": 2,
-              "selected": 1, "ambiguous": 0, "review": "review.md"},
-             [add, scan_again, choose, settings, start_over, photos_of_you, quit_action]),
+              "selected": 1, "ambiguous": 0, "review": "review.md",
+              "all_photos_total": 8},
+             [add, scan_again, choose, view_all, settings, start_over, photos_of_you, quit_action]),
             ("setup incomplete with photos",
              {"setup_complete": False, "exists": True, "total": 2,
-              "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [setup, scan_again, choose, start_over, photos_of_you, quit_action]),
+              "selected": 0, "ambiguous": 0, "review": "review.md",
+              "all_photos_total": 8},
+             [setup, scan_again, choose, view_all, start_over, photos_of_you, quit_action]),
         ]
         for name, state, expected in cases:
             check_equal("guided menu copy matrix %s" % name,
@@ -5059,7 +5733,8 @@ def check_interactive_start_over():
                 "review_path": "custom-review.md",
                 "review_page_size": 12,
             })
-            for path in ("custom-review.md", "review.md", "review.org"):
+            for path in ("custom-review.md", "review.md", "review.org",
+                         ALL_PHOTOS_CACHE_FILE):
                 atomic_write_text(path, "old review\n")
             prompts = []
             confirmations = []
@@ -5105,7 +5780,8 @@ def check_interactive_start_over():
                         prefs.get("review_path"), "custom-review.md")
             check_equal("start-over preserved page size",
                         prefs.get("review_page_size"), 12)
-            for path in ("custom-review.md", "review.md", "review.org"):
+            for path in ("custom-review.md", "review.md", "review.org",
+                         ALL_PHOTOS_CACHE_FILE):
                 check_equal("start-over removed %s" % path, os.path.exists(path), False)
             check_equal("start-over scan calls", len(scan_calls), 1)
             args = scan_calls[0]
@@ -5499,10 +6175,25 @@ def check_web_review_html():
              "wiki": "de.wikipedia.org", "lang": "de"},
         ],
     }
-    text = web_review_html("review.md", [item], ambiguous_count=2)
+    scan_metrics = {
+        "in_use_total": 8,
+        "article_total": 21,
+        "wikipedia_total": 4,
+        "missing_category_total": 1,
+    }
+    categorized_item = dict(
+        item,
+        line=-1,
+        title="File:Already categorized.jpg",
+        label="Already categorized.jpg",
+        checked=False,
+    )
+    text = web_review_html(
+        "review.md", [item], ambiguous_count=2, scan_metrics=scan_metrics,
+        all_photos=[item, categorized_item])
     for needle in (
-            "Photos credited to you",
-            "Credit Check — Photos credited to you",
+            "Your photos on Wikipedia",
+            "Credit Check — Your photos on Wikipedia",
             '<h1 class="product-title" id="product-title">Credit Check</h1>',
             "A free tool from <a class=\"wikiportraits-link\"",
             "font-size: 17px",
@@ -5523,10 +6214,41 @@ def check_web_review_html():
             "action-rail",
             "selection-flow",
             "window.CREDIT_CHECK_ITEMS",
+            "window.CREDIT_CHECK_ALL_PHOTOS",
+            "window.CREDIT_CHECK_ALL_PHOTOS_AVAILABLE = true",
+            "Already categorized.jpg",
             "window.CREDIT_CHECK_REVIEW_ARG",
             "window.CREDIT_CHECK_AMBIGUOUS_COUNT = 2",
+            'window.CREDIT_CHECK_METRICS = {"article_total": 21, "in_use_total": 8, "missing_category_total": 1, "wikipedia_total": 4}',
             "window.CREDIT_CHECK_INITIAL_MODE",
+            'window.CREDIT_CHECK_INITIAL_SCOPE = "missing"',
             "window.CREDIT_CHECK_GUIDED",
+            "Your Wikipedia reach and category progress",
+            'data-scope="missing"',
+            'data-scope="all"',
+            "photos missing your Wikimedia Commons category",
+            "all ${allPhotosTotal.toLocaleString(\"en-US\")} of your photos on Wikipedia",
+            '${currentScope === "missing" ? "Viewing" : "View"}',
+            "all-photos-view",
+            '${readOnly ? " read-only" : ""}',
+            ".picker-workspace {",
+            ".app-shell.all-photos-view .action-rail > :not(.all-photos-rail)",
+            ".picker-shell > .product-header {\n  position: static;",
+            "Your complete Wikipedia gallery.",
+            'id="all-rail-photo-count"',
+            "including photos already in your photographer category",
+            "reach-row",
+            "icon-tabler-camera",
+            "icon-tabler-brand-wikipedia",
+            "icon-tabler-world",
+            'stroke-width="2"',
+            'class="reach-label" id="photo-noun">photos</span>',
+            'class="reach-label" id="article-noun">articles</span>',
+            'class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>',
+            "of your",
+            "photos</span> <span id=\"missing-verb\">are</span> still missing your Wikimedia Commons category",
+            "Distinct article pages across all Wikipedia language editions. Each photo counts once.",
+            "photos ready to review below",
             "a category before",
             "Choose photos to add",
             "Your photo appears in",
@@ -5617,6 +6339,11 @@ def check_web_review_html():
     selected_text = web_review_html("review.md", [item], initial_mode="selected")
     if 'window.CREDIT_CHECK_INITIAL_MODE = "selected"' not in selected_text:
         raise AssertionError("web review selected-only mode was not embedded")
+    all_scope_text = web_review_html(
+        "review.md", [item], all_photos=[item, categorized_item],
+        initial_scope="all")
+    if 'window.CREDIT_CHECK_INITIAL_SCOPE = "all"' not in all_scope_text:
+        raise AssertionError("web review all-photo scope was not embedded")
     guided_text = web_review_html("review.md", [item], guided=True)
     if "You're all set - close this and choose Add selected photos to your photographer category page on Wikimedia Commons from the menu." not in guided_text:
         raise AssertionError("guided web review next step was not embedded")
@@ -5909,7 +6636,80 @@ def check_web_review_stale_save():
             thread.join(5)
             server.server_close()
 
+def check_hidden_category_scan():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, params):
+            self.calls.append(dict(params))
+            return {
+                "query": {
+                    "pages": {
+                        "123": {
+                            "pageid": 123,
+                            "title": "File:Hidden target.jpg",
+                            "categories": [
+                                {"title": "Category:Visible context"},
+                                {"title": "Category:Unrelated hidden", "hidden": ""},
+                                {"title": "Category:Photographs by Test Person", "hidden": ""},
+                                {"title": "Category:Test Person", "hidden": ""},
+                            ],
+                        },
+                    },
+                },
+            }
+
+    old_stderr = sys.stderr
+    try:
+        sys.stderr = io.StringIO()
+        client = FakeClient()
+        details = fetch_details(
+            client,
+            ["File:Hidden target.jpg"],
+            "Photographs by Test Person",
+            "Test Person",
+        )
+    finally:
+        sys.stderr = old_stderr
+
+    check_equal("hidden-category request count", len(client.calls), 1)
+    request = client.calls[0]
+    check_equal("hidden-category scan does not exclude hidden categories",
+                "clshow" in request, False)
+    check_equal("hidden-category scan requests visibility markers",
+                request.get("clprop"), "hidden")
+    record = details["File:Hidden target.jpg"]
+    check_equal("hidden photographer category detected", record["in_by"], True)
+    check_equal("hidden subject category detected", record["in_of"], True)
+    check_equal("unrelated hidden categories stay out of review context",
+                record["cats"], {"Category:Visible context"})
+
+
 def check_scan_routing():
+    first_photo = {
+        "wp": {
+            "en.wikipedia.org|Shared_article": {
+                "wiki": "en.wikipedia.org", "lang": "en", "title": "Shared_article"},
+            "es.wikipedia.org|Otro_artículo": {
+                "wiki": "es.wikipedia.org", "lang": "es", "title": "Otro_artículo"},
+        },
+    }
+    second_photo = {
+        "wp": {
+            "en.wikipedia.org|Shared_article": {
+                "wiki": "en.wikipedia.org", "lang": "en", "title": "Shared_article"},
+            "de.wikipedia.org|Beispiel": {
+                "wiki": "de.wikipedia.org", "lang": "de", "title": "Beispiel"},
+        },
+    }
+    check_equal("distinct Wikipedia reach totals",
+                wikipedia_reach_metrics([first_photo, second_photo]), {
+                    "in_use_total": 2,
+                    "article_total": 3,
+                    "wikipedia_total": 3,
+                })
+
     rec = {
         "text": "{{Information\n|description=Test Person\n}}",
         "pageid": 123,
@@ -5931,6 +6731,94 @@ def check_scan_routing():
     check_equal("not by or depicts",
                 route_record(rec_amb, "TestUser", "Test Person", "Test Person", {123}),
                 "ambiguous")
+
+
+def check_scan_reach_totals():
+    old_cwd = os.getcwd()
+    old_discover = globals()["discover_titles"]
+    old_fetch_details = globals()["fetch_details"]
+    old_fetch_captions = globals()["fetch_english_captions"]
+    try:
+        with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
+            os.chdir(td)
+
+            def fake_discover(cl, username, author, insource_user):
+                return {
+                    "File:Missing.jpg": {"credited"},
+                    "File:Categorized.jpg": {"credited"},
+                    "File:Unused.jpg": {"credited"},
+                }
+
+            def record(pageid, in_by, wp):
+                return {
+                    "pageid": pageid,
+                    "uploader": "TestUser",
+                    "cats": set(),
+                    "in_by": in_by,
+                    "in_of": False,
+                    "wp": wp,
+                    "text": "{{Information\n|author=Test Person\n}}",
+                    "description": "",
+                    "caption": "",
+                }
+
+            def fake_details(cl, titles, by_cat, of_cat):
+                return {
+                    "File:Missing.jpg": record(1, False, {
+                        "en.wikipedia.org|Shared_article": {
+                            "wiki": "en.wikipedia.org", "lang": "en",
+                            "title": "Shared_article"},
+                        "es.wikipedia.org|Otro_artículo": {
+                            "wiki": "es.wikipedia.org", "lang": "es",
+                            "title": "Otro_artículo"},
+                    }),
+                    "File:Categorized.jpg": record(2, True, {
+                        "en.wikipedia.org|Shared_article": {
+                            "wiki": "en.wikipedia.org", "lang": "en",
+                            "title": "Shared_article"},
+                        "de.wikipedia.org|Beispiel": {
+                            "wiki": "de.wikipedia.org", "lang": "de",
+                            "title": "Beispiel"},
+                    }),
+                    "File:Unused.jpg": record(3, False, {}),
+                }
+
+            globals()["discover_titles"] = fake_discover
+            globals()["fetch_details"] = fake_details
+            globals()["fetch_english_captions"] = lambda cl, pageids: {}
+            args = argparse.Namespace(
+                username="TestUser", author="Test Person", by_category=None,
+                of_category=None, qid=None, insource_user=False, no_derivatives=True,
+                depth=0, english_only=False, min_uses=1, review_format="markdown",
+                out="review.md", scan_mode="by", guided=True)
+            check_equal("reach scan wrote review", cmd_scan(args), True)
+            check_equal("reach scan totals include categorized photos",
+                        review_scan_metrics("review.md"), {
+                            "article_total": 3,
+                            "in_use_total": 2,
+                            "missing_category_total": 1,
+                            "wikipedia_total": 3,
+                        })
+            items = parse_review_items("review.md")
+            check_equal("reach scan grid excludes categorized photos", len(items), 1)
+            check_equal("reach scan missing photo title", items[0]["title"],
+                        "File:Missing.jpg")
+            gallery_items = load_all_photos_cache("review.md", items)
+            check_equal("reach gallery includes all in-use photos",
+                        len(gallery_items), 2)
+            check_equal("reach gallery includes categorized photo",
+                        {item["title"] for item in gallery_items}, {
+                            "File:Missing.jpg",
+                            "File:Categorized.jpg",
+                        })
+            check_equal("reach gallery keeps all article uses",
+                        sum(item["uses"] for item in gallery_items), 4)
+    finally:
+        globals()["discover_titles"] = old_discover
+        globals()["fetch_details"] = old_fetch_details
+        globals()["fetch_english_captions"] = old_fetch_captions
+        os.chdir(old_cwd)
+
 
 def check_zero_candidate_scan_no_review():
     old_cwd = os.getcwd()
@@ -6066,7 +6954,9 @@ def cmd_self_test(args):
     run_check("Wikidata candidate parsing", check_wikidata_candidate_parser, failures)
     run_check("interactive Wikidata lookup paths", check_interactive_wikidata_lookup_paths, failures)
     run_check("interactive photos-of-you onboarding", check_interactive_of_scan_onboarding, failures)
+    run_check("hidden-category scan detection", check_hidden_category_scan, failures)
     run_check("scan routing classification", check_scan_routing, failures)
+    run_check("scan Wikipedia reach totals", check_scan_reach_totals, failures)
     run_check("zero-candidate scan guard", check_zero_candidate_scan_no_review, failures)
 
     if failures:
@@ -6278,12 +7168,13 @@ def guided_review_path():
         return None
     return review
 
-def open_review_from_guided_flow(review, initial_mode="all"):
+def open_review_from_guided_flow(review, initial_mode="all", initial_scope="missing"):
     if browser_review_should_fallback(False):
         print("Browser review is not available here; using terminal review instead.")
         return review_file_interactive(review, guided=True)
     ok = review_file_web(review, fallback_on_open_failure=True,
-                         initial_mode=initial_mode, guided=True)
+                         initial_mode=initial_mode, guided=True,
+                         initial_scope=initial_scope)
     if ok is None:
         return review_file_interactive(review, guided=True)
     return ok
@@ -6296,6 +7187,7 @@ def review_workflow_state():
         "total": 0,
         "selected": 0,
         "ambiguous": 0,
+        "all_photos_total": 0,
         "setup_complete": setup_complete(),
         "review_mode": "by",
         "of_category": None,
@@ -6310,6 +7202,13 @@ def review_workflow_state():
         state["total"] = len([item for item in items if item["target"]])
         state["ambiguous"] = len([item for item in items if not item["target"]])
         state["selected"] = len(parse_approved(review, warn=False))
+        all_photos = load_all_photos_cache(review, items)
+        if all_photos is not None:
+            state["all_photos_total"] = len(all_photos)
+        else:
+            metrics = review_scan_metrics(review, fallback_missing=state["total"])
+            if metrics.get("in_use_total") == state["total"]:
+                state["all_photos_total"] = state["total"]
     except OSError:
         state["exists"] = False
     return state
@@ -6501,10 +7400,11 @@ def interactive_start_over():
     run_guided_scan(settings["username"], settings["author"],
                     settings["by_category"], scan_mode="by")
 
-def interactive_review(initial_mode="all"):
+def interactive_review(initial_mode="all", initial_scope="missing"):
     review = guided_review_path()
     if review:
-        open_review_from_guided_flow(review, initial_mode=initial_mode)
+        open_review_from_guided_flow(
+            review, initial_mode=initial_mode, initial_scope=initial_scope)
 
 def interactive_preview_and_commit():
     review = guided_review_path()
@@ -6577,6 +7477,12 @@ def interactive_menu_actions(state):
             "review",
             "Open the browser photo picker and choose photos.",
         ))
+    if state.get("all_photos_total", 0) > 0:
+        actions.append((
+            "View all your photos",
+            "view_all",
+            "Open a read-only gallery of every photo from the latest scan that appears on Wikipedia.",
+        ))
     if primary_value != "settings":
         actions.append((
             "Settings",
@@ -6647,7 +7553,7 @@ def interactive_menu_choice():
     return answer
 
 def interactive_choice_action(choice):
-    if choice in ("self_test", "smoke", "scan_by", "scan_of", "review",
+    if choice in ("self_test", "smoke", "scan_by", "scan_of", "review", "view_all",
                   "settings", "start_over", "add", "quit"):
         return choice
     if str(choice).lower() in ("q", "quit", "exit"):
@@ -6679,6 +7585,8 @@ def cmd_interactive(args):
             interactive_scan("of")
         elif action == "review":
             interactive_review()
+        elif action == "view_all":
+            interactive_review(initial_scope="all")
         elif action == "settings":
             interactive_settings()
         elif action == "start_over":
