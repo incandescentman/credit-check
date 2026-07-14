@@ -66,6 +66,9 @@ Next, Credit Check searches across Wikipedia articles in all languages to find y
 
 After Credit Check finds your photos, it opens a photo picker in a browser. You can then select which photos to add, return to the CLI app, and add them. The guided menu also offers =View all your photos=, which opens the browser directly on the complete read-only gallery from your latest scan.
 
+#+ATTR_HTML: :alt Credit Check browser gallery showing Wikipedia reach, a Wikimedia Commons photographer category, and photos of Sydney Sweeney, Bong Joon Ho, and Alexander Skarsgård :width 100%
+[[file:assets/credit-check-gallery.jpeg]]
+
 When you're done, you can also start over with a different photographer.
 
 * Important: Create a Wikimedia Commons bot password
