@@ -2927,7 +2927,7 @@ button.primary:focus-visible {
             </div>
           </div>
           <div class="save-actions mobile-save-actions">
-            <button type="button" class="primary" data-action="done">Done</button>
+            <button type="button" class="primary" data-action="done">Exit</button>
           </div>
         </div>
         <div class="toolbar-row primary-tools">
@@ -2966,7 +2966,6 @@ button.primary:focus-visible {
         <a class="target-card" id="target-card" target="_blank" rel="noreferrer">
           <p>Your photographer category</p>
           <h2 id="target-summary"></h2>
-          <span>One place to keep track of the Wikipedia articles using your photos.</span>
           <span class="target-card-action">Open on Wikimedia Commons <span aria-hidden="true">↗</span></span>
         </a>
         <section class="preview-panel" id="preview-panel">
@@ -2985,7 +2984,7 @@ button.primary:focus-visible {
         </section>
         <div class="rail-actions">
           <div class="status" id="status" role="status" aria-live="polite"></div>
-          <button type="button" class="primary rail-done" data-action="done">Done</button>
+          <button type="button" class="primary rail-done" data-action="done">Exit</button>
         </div>
         <section class="all-photos-rail" aria-label="About this gallery">
           <p class="rail-kicker">All your photos</p>
@@ -3470,7 +3469,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
   function nextStepText() {
     if (guidedMode) {
-      return "You're all set - close this and choose Add selected photos to your photographer category page on Wikimedia Commons from the menu.";
+      return "Click Exit below, then choose Add selected photos to your photographer category page on Wikimedia Commons from the menu.";
     }
     return `Next: credit-check commit ${reviewArg} --go`;
   }
@@ -3485,7 +3484,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       previewEdits.textContent = "";
       editReceipt.hidden = true;
       nextCommand.textContent = "";
-      doneButtons.forEach((button) => { button.textContent = "Done"; });
+      doneButtons.forEach((button) => { button.textContent = "Exit"; });
       return;
     }
     const selectedTargets = Array.from(new Set(selected.map((item) => item.target)));
@@ -3503,11 +3502,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     ).join("\\n");
     editReceipt.hidden = false;
     nextCommand.textContent = nextStepText();
-    doneButtons.forEach((button) => {
-      button.textContent = button.closest(".mobile-save-actions")
-        ? "Done"
-        : `Done · ${selected.length} selected`;
-    });
+    doneButtons.forEach((button) => { button.textContent = "Exit"; });
   }
 
   function syncThumbnailState(image, failed = false) {
@@ -4069,10 +4064,10 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
         print("Review file: %s" % os.path.abspath(review))
     if guided:
         print("If the browser doesn't open, use this URL: %s" % url)
-        print("Use Done in the browser when you're finished.")
+        print("Use Exit in the browser when you're finished.")
     else:
         print("URL: %s" % url)
-        print("Use Done in the browser, or press Ctrl-C here to stop.")
+        print("Use Exit in the browser, or press Ctrl-C here to stop.")
 
     if open_browser:
         try:
@@ -6325,7 +6320,7 @@ def check_web_review_html():
             "credit-check commit ${reviewArg} --go",
             "Shortcuts: / search, Space select, o open",
             'data-action="done"',
-            "Done",
+            "Exit",
             "scheduleSave",
             "selectionRevision",
             "Saving...",
@@ -6348,9 +6343,16 @@ def check_web_review_html():
     if "Every English-language Wikipedia article using this photo." in text:
         raise AssertionError("web review should show photo metadata instead of generic dialog copy")
     if 'data-action="save"' in text or 'data-action="save-close"' in text:
-        raise AssertionError("web review should rely on auto-save plus Done controls")
-    if text.count('data-action="done">Done</button>') != 2:
-        raise AssertionError("web review should offer desktop and mobile Done controls")
+        raise AssertionError("web review should rely on auto-save plus Exit controls")
+    if text.count('data-action="done">Exit</button>') != 2:
+        raise AssertionError("web review should offer desktop and mobile Exit controls")
+    deleted_category_copy = (
+        "One place to keep " +
+        "track of the Wikipedia articles " +
+        "using your photos."
+    )
+    if deleted_category_copy in text:
+        raise AssertionError("web review should omit the deleted category-card sentence")
     if "After saving" in text or "Then run:" in text or "review-path" in text:
         raise AssertionError("web review should not surface old save/path hints")
 
@@ -6363,7 +6365,7 @@ def check_web_review_html():
     if 'window.CREDIT_CHECK_INITIAL_SCOPE = "all"' not in all_scope_text:
         raise AssertionError("web review all-photo scope was not embedded")
     guided_text = web_review_html("review.md", [item], guided=True)
-    if "You're all set - close this and choose Add selected photos to your photographer category page on Wikimedia Commons from the menu." not in guided_text:
+    if "Click Exit below, then choose Add selected photos to your photographer category page on Wikimedia Commons from the menu." not in guided_text:
         raise AssertionError("guided web review next step was not embedded")
 
 def check_commit_summary_helpers():
