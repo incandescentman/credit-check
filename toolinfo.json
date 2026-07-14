@@ -1,0 +1,32 @@
+{
+  "_schema": "/toolinfo/1.2.2",
+  "_language": "en",
+  "name": "credit-check",
+  "title": "Credit Check",
+  "subtitle": "Keep track of which Wikipedia articles use your photos.",
+  "description": "Credit Check gives you a way to see where all your photos are being used on Wikipedia. Credit Check is a free command-line tool from WikiPortraits. It searches Wikimedia Commons for your photos, then searches Wikipedia across all language editions to find the articles that feature them. You can select which photos to add to a photographer category on Wikimedia Commons, such as Category:Photographs by Jay Dixit, so you can see all your photos together in one place. It also flags photos still missing the category and follows source chains to include crops that point back to the photographer’s original file.",
+  "url": "https://pypi.org/project/credit-check/",
+  "author": [
+    {
+      "name": "Jay Dixit",
+      "wiki_username": "Jaydixit",
+      "url": "https://jaydixit.com/"
+    }
+  ],
+  "repository": "https://github.com/incandescentman/credit-check",
+  "license": "MIT",
+  "for_wikis": [
+    "commons.wikimedia.org",
+    "*.wikipedia.org"
+  ],
+  "available_ui_languages": [
+    "en"
+  ],
+  "technology_used": [
+    "Python"
+  ],
+  "tool_type": "command line tool",
+  "user_docs_url": "https://github.com/incandescentman/credit-check#readme",
+  "feedback_url": "https://github.com/incandescentman/credit-check/issues",
+  "bugtracker_url": "https://github.com/incandescentman/credit-check/issues"
+}
