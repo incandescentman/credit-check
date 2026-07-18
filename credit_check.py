@@ -73,7 +73,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.9"
+__version__ = "1.1.10"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -112,7 +112,7 @@ class Client:
         self.opener.addheaders = [("User-Agent", UA)]
 
     def _call(self, params, data=None, tries=6, retry_post=False,
-              retry_api_errors=None):
+              retry_api_errors=None, headers=None):
         params = {**params, "format": "json"}
         url = self.api + "?" + urllib.parse.urlencode(params)
         body = urllib.parse.urlencode(data).encode() if data else None
@@ -122,7 +122,9 @@ class Client:
             else (retry_api_errors or ()))
         for attempt in range(tries):
             try:
-                with self.opener.open(url, data=body, timeout=60) as r:
+                request = urllib.request.Request(
+                    url, data=body, headers=headers or {})
+                with self.opener.open(request, timeout=60) as r:
                     result = json.load(r)
                 error = result.get("error")
                 if error:
@@ -149,6 +151,17 @@ class Client:
     def post(self, params, data, retry_post=False, retry_api_errors=None):
         return self._call(params, data=data, retry_post=retry_post,
                           retry_api_errors=retry_api_errors)
+
+    def read_post(self, params):
+        """Send a read-only API request with long parameters in the POST body."""
+        data = dict(params)
+        action = data.pop("action")
+        return self._call(
+            {"action": action},
+            data=data,
+            retry_post=True,
+            headers={"Promise-Non-Write-API-Action": "true"},
+        )
 
 
 # ---------------------------------------------------------------- Wikidata lookup
@@ -293,7 +306,7 @@ def fetch_details(cl, titles, by_cat, of_cat):
                 "guprop": "url|namespace", "gufilterlocal": "1", "gulimit": "500"}
         cont = {}
         while True:
-            d = cl.get({**base, **cont})
+            d = cl.read_post({**base, **cont})
             for _, p in d.get("query", {}).get("pages", {}).items():
                 t = p["title"]
                 rec = info.setdefault(t, {"pageid": p.get("pageid"), "uploader": None,
@@ -450,9 +463,11 @@ def fetch_source_details(cl, titles):
     titles = list(titles)
     for i in range(0, len(titles), TITLE_BATCH):
         batch = titles[i:i + TITLE_BATCH]
-        d = cl.get({"action": "query", "titles": "|".join(batch), "redirects": "1",
-                    "prop": "imageinfo|revisions", "iiprop": "user",
-                    "rvprop": "content", "rvslots": "main"})
+        d = cl.read_post({
+            "action": "query", "titles": "|".join(batch), "redirects": "1",
+            "prop": "imageinfo|revisions", "iiprop": "user",
+            "rvprop": "content", "rvslots": "main",
+        })
         q = d.get("query", {})
         alias = {}
         for r in q.get("redirects", []): alias[r["from"]] = r["to"]
@@ -5002,9 +5017,36 @@ def check_retry_policy():
             payload = self.payloads.pop(0)
             return JSONResponse(json.dumps(payload).encode("utf-8"))
 
+    class CapturingOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request, timeout=60):
+            self.requests.append(request)
+            return JSONResponse(b'{"query": {}}')
+
     old_sleep = time.sleep
     time.sleep = lambda seconds: None
     try:
+        cl = Client()
+        cl.opener = CapturingOpener()
+        cl.read_post({
+            "action": "query",
+            "titles": "File:" + ("Long filename " * 100) + ".jpg",
+            "prop": "imageinfo",
+            "continue": "||",
+        })
+        request = cl.opener.requests[0]
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)
+        body = urllib.parse.parse_qs(request.data.decode("utf-8"))
+        headers = {key.lower(): value for key, value in request.header_items()}
+        check_equal("read POST URL parameters", query,
+                    {"action": ["query"], "format": ["json"]})
+        check_equal("read POST keeps titles in body", "titles" in body, True)
+        check_equal("read POST keeps continuation in body", body["continue"], ["||"])
+        check_equal("read POST promise header",
+                    headers.get("promise-non-write-api-action"), "true")
+
         cl = Client()
         cl.opener = FailingOpener()
         try:
@@ -6661,7 +6703,7 @@ def check_hidden_category_scan():
         def __init__(self):
             self.calls = []
 
-        def get(self, params):
+        def read_post(self, params):
             self.calls.append(dict(params))
             return {
                 "query": {
