@@ -1986,9 +1986,9 @@ body {
   grid-template-columns: 1fr;
   justify-items: center;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   min-height: 88px;
-  padding: 10px 8px;
+  padding: 6px 8px;
   color: var(--ink);
   background: transparent;
   border: 1px solid transparent;
@@ -2002,13 +2002,13 @@ body {
 .scope-tab-icon {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   color: var(--muted);
   background: rgba(14, 107, 69, 0.06);
   border-radius: 7px;
 }
-.scope-tab-icon svg { width: 19px; height: 19px; }
+.scope-tab-icon svg { width: 22px; height: 22px; }
 .scope-tab-copy { display: grid; gap: 2px; min-width: 0; }
 .scope-tab-title {
   font-size: 13px;
@@ -3086,7 +3086,7 @@ button.primary:focus-visible {
                 </div>
                 <div class="scope-panel">
                 <div class="scope-tabs" role="tablist" aria-label="Your photo views">
-                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v10H4z"/><path d="M15 13v4M13 15h4"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Add to category</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
+                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v10H4z"/><path d="M15 13v4M13 15h4"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Photos to add</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
                   <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 19"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
                   <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
                 </div>
@@ -6513,7 +6513,7 @@ def check_web_review_html():
             'data-scope="missing"',
             'data-scope="all"',
             'data-scope="wikidata"',
-            "Add to category",
+            "Photos to add",
             "All your photos",
             "On Wikidata",
             "${allPhotosTotal.toLocaleString(\"en-US\")} on Wikipedia",
