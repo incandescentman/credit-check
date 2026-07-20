@@ -2009,6 +2009,12 @@ body {
   border-radius: 7px;
 }
 .scope-tab-icon svg { width: 22px; height: 22px; }
+.scope-tab-icon img {
+  display: block;
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
 .scope-tab-copy { display: grid; gap: 2px; min-width: 0; }
 .scope-tab-title {
   font-size: 13px;
@@ -2037,6 +2043,10 @@ body {
 .scope-tab.active .scope-tab-icon {
   color: #fff;
   background: var(--accent-strong);
+}
+.scope-tab[data-scope="wikidata"].active .scope-tab-icon {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(14, 107, 69, 0.18);
 }
 .scope-tab.active .scope-tab-meta { color: var(--accent-strong); }
 .scope-tab:disabled {
@@ -2098,7 +2108,13 @@ body {
   background: rgba(14, 107, 69, 0.07);
   border-radius: 7px;
 }
-.wikidata-reach-icon svg { width: 21px; height: 21px; }
+.wikidata-reach-icon svg,
+.wikidata-reach-icon img {
+  display: block;
+  width: 21px;
+  height: 21px;
+  object-fit: contain;
+}
 .wikidata-reach-copy { display: grid; gap: 1px; }
 .wikidata-reach-kicker {
   font-size: 10px;
@@ -2128,9 +2144,12 @@ body {
   border: 1px solid rgba(14, 107, 69, 0.12);
   border-radius: 13px;
 }
-.reach-icon svg {
+.reach-icon svg,
+.reach-icon img {
+  display: block;
   width: 26px;
   height: 26px;
+  object-fit: contain;
 }
 .reach-row strong {
   color: var(--accent-strong);
@@ -2978,7 +2997,8 @@ button.primary:focus-visible {
     height: 34px;
     border-radius: 10px;
   }
-  .reach-icon svg {
+  .reach-icon svg,
+  .reach-icon img {
     width: 21px;
     height: 21px;
   }
@@ -3066,7 +3086,7 @@ button.primary:focus-visible {
                     <span class="reach-label" id="photo-noun">photos</span>
                   </div>
                   <div class="reach-row">
-                    <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-brand-wikipedia" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.984h2" /><path d="M8 4.984h2.5" /><path d="M14.5 4.984h2.5" /><path d="M22 4.984h-2" /><path d="M4 4.984l5.455 14.516l6.545 -14.516" /><path d="M9 4.984l6 14.516l6 -14.516" /></svg></span>
+                    <span class="reach-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Wikipedia%27s_W.svg" alt=""></span>
                     <strong id="article-count">—</strong>
                     <span class="reach-label" id="article-noun">articles</span>
                   </div>
@@ -3077,7 +3097,7 @@ button.primary:focus-visible {
                   </div>
                   </div>
                   <div class="wikidata-reach" id="wikidata-reach" hidden>
-                    <span class="wikidata-reach-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span>
+                    <span class="wikidata-reach-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Notification-icon-Wikidata-logo.svg" alt=""></span>
                     <span class="wikidata-reach-copy">
                       <span class="wikidata-reach-kicker">Beyond Wikipedia</span>
                       <span class="wikidata-reach-line"><strong id="wikidata-photo-count">— photos</strong> are used on <strong id="wikidata-item-count">— Wikidata items</strong></span>
@@ -3086,9 +3106,9 @@ button.primary:focus-visible {
                 </div>
                 <div class="scope-panel">
                 <div class="scope-tabs" role="tablist" aria-label="Your photo views">
-                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v10H4z"/><path d="M15 13v4M13 15h4"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Photos to add</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
-                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 19"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
-                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
+                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13l-7 7-9-9V4h7l3 3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M18 3v6M15 6h6"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Photos to add</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
+                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
+                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Notification-icon-Wikidata-logo.svg" alt=""></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
                 </div>
                 <p class="scope-description" id="scope-description">Choose photos to add to your photographer category on Wikimedia Commons.</p>
                 </div>
@@ -6540,7 +6560,8 @@ def check_web_review_html():
             "wikidataItemIds.size",
             "Showing ${wikidataPhotos.length} photos used on Wikidata.",
             "icon-tabler-camera",
-            "icon-tabler-brand-wikipedia",
+            "Wikipedia%27s_W.svg",
+            "Notification-icon-Wikidata-logo.svg",
             "icon-tabler-world",
             'stroke-width="2"',
             'class="reach-label" id="photo-noun">photos</span>',
