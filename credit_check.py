@@ -73,7 +73,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.10"
+__version__ = "1.1.11"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
