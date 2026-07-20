@@ -1982,8 +1982,13 @@ body {
   border-radius: 13px;
 }
 .scope-tab {
-  min-height: 54px;
-  padding: 9px 13px;
+  display: grid;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  align-items: center;
+  gap: 5px;
+  min-height: 88px;
+  padding: 10px 8px;
   color: var(--ink);
   background: transparent;
   border: 1px solid transparent;
@@ -1994,11 +1999,27 @@ body {
   text-align: center;
   transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
-.scope-tab-prefix {
-  display: inline-block;
-  width: 3.75em;
-  margin-right: 0.2em;
-  text-align: right;
+.scope-tab-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: var(--muted);
+  background: rgba(14, 107, 69, 0.06);
+  border-radius: 7px;
+}
+.scope-tab-icon svg { width: 19px; height: 19px; }
+.scope-tab-copy { display: grid; gap: 2px; min-width: 0; }
+.scope-tab-title {
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+.scope-tab-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1.25;
 }
 .scope-tab:hover:not(:disabled),
 .scope-tab:focus-visible:not(:disabled) {
@@ -2013,9 +2034,21 @@ body {
   border-color: rgba(14, 107, 69, 0.2);
   box-shadow: 0 5px 18px -14px rgba(11, 87, 56, 0.65);
 }
+.scope-tab.active .scope-tab-icon {
+  color: #fff;
+  background: var(--accent-strong);
+}
+.scope-tab.active .scope-tab-meta { color: var(--accent-strong); }
 .scope-tab:disabled {
   cursor: not-allowed;
   opacity: 0.48;
+}
+.scope-panel { min-width: 0; }
+.scope-description {
+  margin: 8px 5px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 .scan-metrics {
   width: min(100%, 540px);
@@ -2055,12 +2088,6 @@ body {
   border-top: 1px solid rgba(14, 107, 69, 0.12);
   font: inherit;
   text-align: left;
-}
-.wikidata-reach:hover,
-.wikidata-reach:focus-visible,
-.wikidata-reach[aria-pressed="true"] {
-  color: var(--accent-strong);
-  background: rgba(14, 107, 69, 0.07);
 }
 .wikidata-reach-icon {
   display: grid;
@@ -2888,6 +2915,10 @@ button.primary:focus-visible {
   .scope-tabs {
     width: min(100%, 540px);
   }
+  .scope-panel,
+  .scope-description {
+    width: min(100%, 540px);
+  }
 }
 @media (max-width: 620px) {
   .app-shell {
@@ -3045,18 +3076,21 @@ button.primary:focus-visible {
                     <span class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>
                   </div>
                   </div>
-                  <button type="button" class="wikidata-reach" id="wikidata-reach" aria-pressed="false" hidden>
+                  <div class="wikidata-reach" id="wikidata-reach" hidden>
                     <span class="wikidata-reach-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span>
                     <span class="wikidata-reach-copy">
                       <span class="wikidata-reach-kicker">Beyond Wikipedia</span>
                       <span class="wikidata-reach-line"><strong id="wikidata-photo-count">— photos</strong> are used on <strong id="wikidata-item-count">— Wikidata items</strong></span>
                     </span>
-                  </button>
+                  </div>
                 </div>
+                <div class="scope-panel">
                 <div class="scope-tabs" role="tablist" aria-label="Your photo views">
-                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-prefix" id="missing-scope-prefix">Viewing</span> <span id="missing-scope-label">photos missing your Wikimedia Commons category</span></button>
-                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-prefix" id="all-scope-prefix">View</span> <span id="all-scope-label">all your photos on Wikipedia</span></button>
-                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-prefix" id="wikidata-scope-prefix">View</span> <span id="wikidata-scope-label">photos used on Wikidata</span></button>
+                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h5l2 2h9v10H4z"/><path d="M15 13v4M13 15h4"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Add to category</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
+                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-5-5L5 19"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
+                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
+                </div>
+                <p class="scope-description" id="scope-description">Choose photos to add to your photographer category on Wikimedia Commons.</p>
                 </div>
               </div>
               <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
@@ -3192,12 +3226,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
   const missingScopeTab = document.getElementById("missing-scope-tab");
   const allScopeTab = document.getElementById("all-scope-tab");
-  const missingScopePrefix = document.getElementById("missing-scope-prefix");
-  const allScopePrefix = document.getElementById("all-scope-prefix");
-  const wikidataScopePrefix = document.getElementById("wikidata-scope-prefix");
   const missingScopeText = document.getElementById("missing-scope-label");
   const allScopeText = document.getElementById("all-scope-label");
   const wikidataScopeText = document.getElementById("wikidata-scope-label");
+  const scopeDescription = document.getElementById("scope-description");
   const screenTitle = document.getElementById("screen-title");
   const inUseCount = document.getElementById("in-use-count");
   const articleCount = document.getElementById("article-count");
@@ -3302,15 +3334,13 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   missingCategoryCount.textContent = missingTotal.toLocaleString("en-US");
   missingPhotoNoun.textContent = missingTotal === 1 ? "photo" : "photos";
   missingVerb.textContent = missingTotal === 1 ? "is" : "are";
-  const missingScopeLabel = `${missingTotal.toLocaleString("en-US")} ${missingTotal === 1 ? "photo" : "photos"} missing your Wikimedia Commons category`;
+  const missingScopeLabel = `${missingTotal.toLocaleString("en-US")} ${missingTotal === 1 ? "photo" : "photos"}`;
   const allPhotosTotal = Number.isInteger(scanMetrics.in_use_total)
     ? scanMetrics.in_use_total
     : allPhotos.length;
   allRailPhotoCount.textContent = allPhotosTotal.toLocaleString("en-US");
-  const allScopeLabel = allPhotosTotal === 1
-    ? "your photo on Wikipedia"
-    : `all ${allPhotosTotal.toLocaleString("en-US")} of your photos on Wikipedia`;
-  const wikidataScopeLabel = `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} used on Wikidata`;
+  const allScopeLabel = `${allPhotosTotal.toLocaleString("en-US")} on Wikipedia`;
+  const wikidataScopeLabel = `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} · ${wikidataItemIds.size.toLocaleString("en-US")} ${wikidataItemIds.size === 1 ? "item" : "items"}`;
   allScopeTab.disabled = !allPhotosAvailable;
   document.getElementById("wikidata-scope-tab").disabled = !wikidataPhotos.length;
   if (!allPhotosAvailable) {
@@ -3624,9 +3654,6 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function renderScopeButtons() {
-    missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View";
-    allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View";
-    wikidataScopePrefix.textContent = currentScope === "wikidata" ? "Viewing" : "View";
     missingScopeText.textContent = missingScopeLabel;
     allScopeText.textContent = allScopeLabel;
     wikidataScopeText.textContent = wikidataScopeLabel;
@@ -3635,6 +3662,11 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
+    scopeDescription.textContent = currentScope === "all"
+      ? "Browse every photo from this scan, including photos already in your category."
+      : currentScope === "wikidata"
+        ? "See which of your photos are used on Wikidata items."
+        : "Choose photos to add to your photographer category on Wikimedia Commons.";
     appShell.classList.toggle("all-photos-view", currentScope !== "missing");
     ambiguousNote.hidden = currentScope !== "missing";
     if (currentScope === "wikidata") {
@@ -4011,15 +4043,6 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     button.addEventListener("click", () => save(true));
   });
   search.addEventListener("input", render);
-  wikidataReach.addEventListener("click", () => {
-    if (!allPhotosAvailable || !wikidataPhotos.length) return;
-    currentScope = "wikidata";
-    currentMode = "all";
-    wikidataReach.setAttribute("aria-pressed", "true");
-    status.textContent = `Showing ${wikidataPhotos.length} photos used on Wikidata.`;
-    render();
-    sections.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       currentMode = button.dataset.mode;
@@ -4036,7 +4059,6 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       if (button.disabled || button.dataset.scope === currentScope) return;
       currentScope = button.dataset.scope;
       currentMode = "all";
-      wikidataReach.setAttribute("aria-pressed", currentScope === "wikidata" ? "true" : "false");
       lastFocusedLine = currentItems().length ? currentItems()[0].line : null;
       status.textContent = currentScope === "all"
         ? "Showing all your photos on Wikipedia."
@@ -6491,13 +6513,17 @@ def check_web_review_html():
             'data-scope="missing"',
             'data-scope="all"',
             'data-scope="wikidata"',
-            "photos missing your Wikimedia Commons category",
-            "all ${allPhotosTotal.toLocaleString(\"en-US\")} of your photos on Wikipedia",
-            'missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View"',
-            'allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View"',
-            'wikidataScopePrefix.textContent = currentScope === "wikidata" ? "Viewing" : "View"',
-            ".scope-tab-prefix {",
-            "width: 3.75em",
+            "Add to category",
+            "All your photos",
+            "On Wikidata",
+            "${allPhotosTotal.toLocaleString(\"en-US\")} on Wikipedia",
+            ".scope-tab-icon {",
+            ".scope-tab-title {",
+            ".scope-tab-meta {",
+            "scope-description",
+            "Choose photos to add to your photographer category on Wikimedia Commons.",
+            "Browse every photo from this scan, including photos already in your category.",
+            "See which of your photos are used on Wikidata items.",
             "all-photos-view",
             '${readOnly ? " read-only" : ""}',
             ".picker-workspace {",
