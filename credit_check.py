@@ -311,7 +311,7 @@ def fetch_details(cl, titles, by_cat, of_cat):
                 t = p["title"]
                 rec = info.setdefault(t, {"pageid": p.get("pageid"), "uploader": None,
                                           "cats": set(), "in_by": False, "in_of": False,
-                                          "wp": {}, "text": "", "description": "",
+                                          "wp": {}, "wd": {}, "text": "", "description": "",
                                           "caption": ""})
                 ii = (p.get("imageinfo") or [{}])[0]
                 if ii.get("user"): rec["uploader"] = ii["user"]
@@ -332,12 +332,46 @@ def fetch_details(cl, titles, by_cat, of_cat):
                     if u.get("ns") == "0" and u["wiki"].endswith("wikipedia.org"):
                         rec["wp"][u["wiki"] + "|" + u["title"]] = {
                             "wiki": u["wiki"], "lang": u["wiki"].split(".")[0], "title": u["title"]}
+                    elif (u.get("ns") == "0" and u.get("wiki") == "www.wikidata.org"
+                          and re.fullmatch(r"Q\d+", u.get("title", ""))):
+                        rec["wd"][u["title"]] = {
+                            "id": u["title"],
+                            "label": u["title"],
+                            "url": "https://www.wikidata.org/wiki/%s" % u["title"],
+                        }
             if "continue" in d: cont = d["continue"]
             else: break
         print("  detail %d/%d..." % (min(i + TITLE_BATCH, len(titles)), len(titles)),
               file=sys.stderr)
         time.sleep(0.5)
     return info
+
+
+def fetch_wikidata_usage_labels(records):
+    """Add English labels to Wikidata global-usage items in-place."""
+    qids = sorted({qid for rec in records for qid in rec.get("wd", {})})
+    if not qids:
+        return 0
+    cl = Client(WIKIDATA_API)
+    for i in range(0, len(qids), TITLE_BATCH):
+        batch = qids[i:i + TITLE_BATCH]
+        data = cl.get({
+            "action": "wbgetentities",
+            "ids": "|".join(batch),
+            "props": "labels",
+            "languages": "en",
+            "languagefallback": "1",
+        })
+        for qid, entity in data.get("entities", {}).items():
+            labels = entity.get("labels") or {}
+            label = (labels.get("en") or next(iter(labels.values()), {})).get("value")
+            if not label:
+                continue
+            for rec in records:
+                if qid in rec.get("wd", {}):
+                    rec["wd"][qid]["label"] = label
+        time.sleep(0.4)
+    return len(qids)
 
 
 def fetch_depicts(cl, pageids, qid):
@@ -593,7 +627,7 @@ def org_use_line(use):
 REVIEW_FORMAT_ENV = "CREDIT_CHECK_REVIEW_FORMAT"
 PREFERENCE_FILE = ".credit-check.json"
 ALL_PHOTOS_CACHE_FILE = ".credit-check-all-photos.json"
-ALL_PHOTOS_CACHE_VERSION = 1
+ALL_PHOTOS_CACHE_VERSION = 2
 PHOTOGRAPHER_PREF_KEYS = (
     "username", "author", "by_category", "of_category", "qid",
 )
@@ -788,6 +822,10 @@ def all_photos_item(title, rec, target, line):
             }
             for use in uses
         ],
+        "wikidata_items": sorted(
+            rec.get("wd", {}).values(),
+            key=lambda item: (item.get("label", "").casefold(), item.get("id", "")),
+        ),
         "caption": rec.get("caption", ""),
     }
 
@@ -831,7 +869,8 @@ def load_all_photos_cache(review, review_items):
         if not isinstance(item, dict) or not isinstance(item.get("title"), str):
             return None
         articles = item.get("articles", [])
-        if not isinstance(articles, list):
+        wikidata_items = item.get("wikidata_items", [])
+        if not isinstance(articles, list) or not isinstance(wikidata_items, list):
             return None
         normalized = dict(item)
         normalized["line"] = -(index + 1)
@@ -839,6 +878,7 @@ def load_all_photos_cache(review, review_items):
         normalized["label"] = item.get("label") or commons_file_name(item["title"])
         normalized["uses"] = item.get("uses") if isinstance(item.get("uses"), int) else None
         normalized["articles"] = articles
+        normalized["wikidata_items"] = wikidata_items
         normalized["caption"] = item.get("caption", "")
         items.append(normalized)
     return items
@@ -1268,6 +1308,7 @@ def web_review_payload(items):
             "checked": item["checked"],
             "uses": item["uses"],
             "articles": item.get("articles", []),
+            "wikidata_items": item.get("wikidata_items", []),
             "caption": item.get("caption", ""),
             "file_url": commons_file_url(item["title"]),
             "thumb_url": commons_thumb_url(item["title"], width=420),
@@ -1580,6 +1621,12 @@ main {
   color: var(--muted);
   font-size: 13px;
   text-align: right;
+}
+.section-heading-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 .grid {
   display: grid;
@@ -1924,7 +1971,7 @@ body {
 }
 .scope-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-self: start;
   gap: 5px;
   width: 100%;
@@ -1995,6 +2042,45 @@ body {
   padding: 12px 24px;
   color: var(--ink);
 }
+.wikidata-reach {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 24px 15px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.42);
+  border: 0;
+  border-top: 1px solid rgba(14, 107, 69, 0.12);
+  font: inherit;
+  text-align: left;
+}
+.wikidata-reach:hover,
+.wikidata-reach:focus-visible,
+.wikidata-reach[aria-pressed="true"] {
+  color: var(--accent-strong);
+  background: rgba(14, 107, 69, 0.07);
+}
+.wikidata-reach-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--accent-strong);
+  background: rgba(14, 107, 69, 0.07);
+  border-radius: 7px;
+}
+.wikidata-reach-icon svg { width: 21px; height: 21px; }
+.wikidata-reach-copy { display: grid; gap: 1px; }
+.wikidata-reach-kicker {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+.wikidata-reach-line { font-size: 13px; line-height: 1.35; }
+.wikidata-reach-line strong { color: var(--ink); font-weight: 750; }
 .reach-row {
   display: grid;
   grid-template-columns: 46px max-content minmax(0, 1fr);
@@ -2365,11 +2451,13 @@ button.primary:focus-visible {
   font-size: 13px;
 }
 .article-disclosure,
+.wikidata-disclosure,
 .photo-details,
 .edit-receipt {
   min-width: 0;
 }
 .article-disclosure > summary,
+.wikidata-disclosure > summary,
 .photo-details > summary,
 .edit-receipt > summary {
   color: var(--accent-strong);
@@ -2379,6 +2467,8 @@ button.primary:focus-visible {
 }
 .article-disclosure > summary:hover,
 .article-disclosure > summary:focus-visible,
+.wikidata-disclosure > summary:hover,
+.wikidata-disclosure > summary:focus-visible,
 .photo-details > summary:hover,
 .photo-details > summary:focus-visible,
 .edit-receipt > summary:hover,
@@ -2386,6 +2476,34 @@ button.primary:focus-visible {
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+.wikidata-disclosure {
+  margin-top: 10px;
+  color: var(--muted);
+}
+.wikidata-disclosure > summary {
+  color: var(--muted);
+  font-weight: 600;
+}
+.wikidata-list {
+  gap: 5px;
+  max-height: 150px;
+  margin: 7px 0 0;
+  padding: 8px 4px 2px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+}
+.wikidata-list a {
+  color: var(--muted);
+  text-decoration: none;
+}
+.wikidata-list a:hover,
+.wikidata-list a:focus-visible {
+  color: var(--accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.wikidata-id { color: var(--faint); }
 .article-list {
   gap: 5px;
   max-height: 180px;
@@ -2927,10 +3045,18 @@ button.primary:focus-visible {
                     <span class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>
                   </div>
                   </div>
+                  <button type="button" class="wikidata-reach" id="wikidata-reach" aria-pressed="false" hidden>
+                    <span class="wikidata-reach-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h2v14H3zM7 5h1v14H7zM10 5h3v14h-3zM15 5h1v14h-1zM18 5h3v14h-3z"/></svg></span>
+                    <span class="wikidata-reach-copy">
+                      <span class="wikidata-reach-kicker">Beyond Wikipedia</span>
+                      <span class="wikidata-reach-line"><strong id="wikidata-photo-count">— photos</strong> are used on <strong id="wikidata-item-count">— Wikidata items</strong></span>
+                    </span>
+                  </button>
                 </div>
                 <div class="scope-tabs" role="tablist" aria-label="Your photo views">
                   <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-prefix" id="missing-scope-prefix">Viewing</span> <span id="missing-scope-label">photos missing your Wikimedia Commons category</span></button>
                   <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-prefix" id="all-scope-prefix">View</span> <span id="all-scope-label">all your photos on Wikipedia</span></button>
+                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-prefix" id="wikidata-scope-prefix">View</span> <span id="wikidata-scope-label">photos used on Wikidata</span></button>
                 </div>
               </div>
               <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
@@ -3002,10 +3128,10 @@ button.primary:focus-visible {
           <button type="button" class="primary rail-done" data-action="done">Exit</button>
         </div>
         <section class="all-photos-rail" aria-label="About this gallery">
-          <p class="rail-kicker">All your photos</p>
-          <h2>Your complete Wikipedia gallery.</h2>
-          <p>This read-only view contains all <strong id="all-rail-photo-count">—</strong> photos from this scan, including photos already in your photographer category.</p>
-          <p>Switch to the missing-category tab to choose photos to add.</p>
+          <p class="rail-kicker" id="gallery-rail-kicker">All your photos</p>
+          <h2 id="gallery-rail-title">Your complete Wikipedia gallery.</h2>
+          <p id="gallery-rail-description">This read-only view contains all <strong id="all-rail-photo-count">—</strong> photos from this scan, including photos already in your photographer category.</p>
+          <p id="gallery-rail-guidance">Switch to the missing-category tab to choose photos to add.</p>
         </section>
       </aside>
     </div>
@@ -3068,12 +3194,17 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const allScopeTab = document.getElementById("all-scope-tab");
   const missingScopePrefix = document.getElementById("missing-scope-prefix");
   const allScopePrefix = document.getElementById("all-scope-prefix");
+  const wikidataScopePrefix = document.getElementById("wikidata-scope-prefix");
   const missingScopeText = document.getElementById("missing-scope-label");
   const allScopeText = document.getElementById("all-scope-label");
+  const wikidataScopeText = document.getElementById("wikidata-scope-label");
   const screenTitle = document.getElementById("screen-title");
   const inUseCount = document.getElementById("in-use-count");
   const articleCount = document.getElementById("article-count");
   const wikipediaCount = document.getElementById("wikipedia-count");
+  const wikidataReach = document.getElementById("wikidata-reach");
+  const wikidataPhotoCount = document.getElementById("wikidata-photo-count");
+  const wikidataItemCount = document.getElementById("wikidata-item-count");
   const missingCategoryCount = document.getElementById("missing-category-count");
   const photoNoun = document.getElementById("photo-noun");
   const articleNoun = document.getElementById("article-noun");
@@ -3094,6 +3225,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const railSelectedCount = document.getElementById("rail-selected-count");
   const railFlowTarget = document.getElementById("rail-flow-target");
   const allRailPhotoCount = document.getElementById("all-rail-photo-count");
+  const galleryRailKicker = document.getElementById("gallery-rail-kicker");
+  const galleryRailTitle = document.getElementById("gallery-rail-title");
+  const galleryRailDescription = document.getElementById("gallery-rail-description");
+  const galleryRailGuidance = document.getElementById("gallery-rail-guidance");
   const doneButtons = Array.from(document.querySelectorAll('[data-action="done"]'));
   const articleDialog = document.getElementById("article-dialog");
   const articleDialogTitle = document.getElementById("article-dialog-title");
@@ -3152,6 +3287,15 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   } else {
     scanMetricsNote.textContent = "Scan again to calculate your complete Wikipedia reach.";
   }
+  const wikidataPhotos = allPhotos.filter((item) => (item.wikidata_items || []).length > 0);
+  const wikidataItemIds = new Set(
+    wikidataPhotos.flatMap((item) => item.wikidata_items.map((entry) => entry.id))
+  );
+  if (wikidataPhotos.length) {
+    wikidataReach.hidden = false;
+    wikidataPhotoCount.textContent = `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"}`;
+    wikidataItemCount.textContent = `${wikidataItemIds.size.toLocaleString("en-US")} Wikidata ${wikidataItemIds.size === 1 ? "item" : "items"}`;
+  }
   const missingTotal = Number.isInteger(scanMetrics.missing_category_total)
     ? scanMetrics.missing_category_total
     : items.length;
@@ -3166,7 +3310,9 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const allScopeLabel = allPhotosTotal === 1
     ? "your photo on Wikipedia"
     : `all ${allPhotosTotal.toLocaleString("en-US")} of your photos on Wikipedia`;
+  const wikidataScopeLabel = `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} used on Wikidata`;
   allScopeTab.disabled = !allPhotosAvailable;
+  document.getElementById("wikidata-scope-tab").disabled = !wikidataPhotos.length;
   if (!allPhotosAvailable) {
     allScopeTab.title = "Scan again to create your complete all-photos gallery.";
   }
@@ -3214,7 +3360,8 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
 
   function itemText(item) {
     const articleTitles = (item.articles || []).map((article) => article.title);
-    return [item.caption, item.label, item.title, item.target, item.uses, ...articleTitles]
+    const wikidataText = (item.wikidata_items || []).flatMap((entry) => [entry.label, entry.id]);
+    return [item.caption, item.label, item.title, item.target, item.uses, ...articleTitles, ...wikidataText]
       .join(" ")
       .toLowerCase();
   }
@@ -3231,7 +3378,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function currentItems() {
-    return currentScope === "all" ? allPhotos : items;
+    return currentScope === "missing" ? items : allPhotos;
   }
 
   function visibleItems() {
@@ -3239,6 +3386,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     return currentItems().filter((item) => {
       if (currentScope === "missing" && currentMode === "selected" && !item.selected) return false;
       if (currentScope === "missing" && currentMode === "unselected" && item.selected) return false;
+      if (currentScope === "wikidata" && !(item.wikidata_items || []).length) return false;
       return !query || itemText(item).includes(query);
     });
   }
@@ -3355,6 +3503,21 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     return `${articleListHtml(visibleEnglish, false, true)}${allEnglish}${moreLanguages}`;
   }
 
+  function wikidataHtml(item) {
+    const wikidataItems = item.wikidata_items || [];
+    if (!wikidataItems.length) return "";
+    const noun = wikidataItems.length === 1 ? "item" : "items";
+    const rows = wikidataItems.map((entry) => {
+      const label = entry.label || entry.id;
+      const id = label === entry.id ? "" : ` <span class="wikidata-id">(${escapeHtml(entry.id)})</span>`;
+      return `<li><a href="${escapeHtml(entry.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}${id}</a></li>`;
+    }).join("");
+    return `<details class="wikidata-disclosure">
+      <summary>Also used on Wikidata · ${wikidataItems.length} ${noun}</summary>
+      <ul class="article-list wikidata-list">${rows}</ul>
+    </details>`;
+  }
+
   function openArticleDialog(line, opener) {
     const item = currentItems().find((candidate) => candidate.line === line);
     if (!item) return;
@@ -3374,7 +3537,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function cardHtml(item) {
-    const readOnly = currentScope === "all";
+    const readOnly = currentScope !== "missing";
     const selectedClass = !readOnly && item.selected ? " selected" : "";
     const checked = item.selected ? " checked" : "";
     const targetLine = singleTarget ? "" : `<p class="target">Category:${escapeHtml(item.target)}</p>`;
@@ -3400,6 +3563,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       <div class="photo-content">
         <p class="used-label">Your photo appears in:</p>
         ${articleHtml(item)}
+        ${wikidataHtml(item)}
         <details class="photo-details">
           <summary>Photo details</summary>
           <div class="technical-details">
@@ -3415,26 +3579,33 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   }
 
   function sectionHtml(group) {
-    const readOnly = currentScope === "all";
-    const title = readOnly
+    const readOnly = currentScope !== "missing";
+    const title = currentScope === "wikidata"
+      ? "Your photos used on Wikidata"
+      : readOnly
       ? "All your photos on Wikipedia"
       : singleTarget ? "Choose photos to add" : `Category:${group.target}`;
-    const count = `${group.items.length} ${group.items.length === 1 ? "photo" : "photos"}`;
+    const count = currentScope === "wikidata"
+      ? `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} across ${wikidataItemIds.size.toLocaleString("en-US")} Wikidata ${wikidataItemIds.size === 1 ? "item" : "items"}`
+      : `${group.items.length} ${group.items.length === 1 ? "photo" : "photos"}`;
     const selected = group.items.filter((item) => item.selected).length;
     return `<section class="section" data-target="${escapeHtml(group.target)}">
       <div class="section-heading">
         <h2>${escapeHtml(title)}</h2>
-        <p>${readOnly ? count : `${selected} selected / ${count}`}</p>
+        <div class="section-heading-meta">
+          <p>${readOnly ? count : `${selected} selected / ${count}`}</p>
+        </div>
       </div>
       <div class="grid">${group.items.map(cardHtml).join("")}</div>
     </section>`;
   }
 
   function updateSummary(visible) {
-    if (currentScope === "all") {
-      resultCount.textContent = visible.length === allPhotos.length
-        ? `${allPhotos.length} ${allPhotos.length === 1 ? "photo" : "photos"} in this gallery`
-        : `${visible.length} of ${allPhotos.length} photos showing`;
+    if (currentScope !== "missing") {
+      const scopeTotal = currentScope === "wikidata" ? wikidataPhotos.length : allPhotos.length;
+      resultCount.textContent = visible.length === scopeTotal
+        ? `${scopeTotal} ${scopeTotal === 1 ? "photo" : "photos"} in this gallery`
+        : `${visible.length} of ${scopeTotal} photos showing`;
       return;
     }
     const selected = items.filter((item) => item.selected).length;
@@ -3455,15 +3626,28 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   function renderScopeButtons() {
     missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View";
     allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View";
+    wikidataScopePrefix.textContent = currentScope === "wikidata" ? "Viewing" : "View";
     missingScopeText.textContent = missingScopeLabel;
     allScopeText.textContent = allScopeLabel;
+    wikidataScopeText.textContent = wikidataScopeLabel;
     scopeButtons.forEach((button) => {
       const active = button.dataset.scope === currentScope;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
     });
-    appShell.classList.toggle("all-photos-view", currentScope === "all");
-    ambiguousNote.hidden = currentScope === "all";
+    appShell.classList.toggle("all-photos-view", currentScope !== "missing");
+    ambiguousNote.hidden = currentScope !== "missing";
+    if (currentScope === "wikidata") {
+      galleryRailKicker.textContent = "Wikidata view";
+      galleryRailTitle.textContent = "Your Wikidata photo gallery.";
+      galleryRailDescription.textContent = `${wikidataPhotos.length} photos used across ${wikidataItemIds.size} Wikidata items.`;
+      galleryRailGuidance.textContent = "Choose All Wikipedia photos above to return to the complete gallery.";
+    } else {
+      galleryRailKicker.textContent = "All your photos";
+      galleryRailTitle.textContent = "Your complete Wikipedia gallery.";
+      galleryRailDescription.innerHTML = `This read-only view contains all <strong>${allPhotosTotal.toLocaleString("en-US")}</strong> photos from this scan, including photos already in your photographer category.`;
+      galleryRailGuidance.textContent = "Switch to the missing-category tab to choose photos to add.";
+    }
   }
 
   function selectedItems() {
@@ -3552,7 +3736,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     renderModeButtons();
     updateSummary(visible);
     empty.classList.toggle("show", visible.length === 0);
-    const groups = currentScope === "all"
+    const groups = currentScope !== "missing"
       ? [{ target: "", items: visible }]
       : groupItems(visible);
     sections.innerHTML = groups.map(sectionHtml).join("");
@@ -3742,7 +3926,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     const card = event.target.closest(".photo");
     if (!card) return;
     lastFocusedLine = Number(card.dataset.line);
-    if (currentScope === "all") return;
+    if (currentScope !== "missing") return;
     if (event.target.closest("a, button, input, label, summary, details")) return;
     toggleLine(Number(card.dataset.line));
   });
@@ -3753,7 +3937,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   });
 
   sections.addEventListener("keydown", (event) => {
-    if (currentScope === "all") return;
+    if (currentScope !== "missing") return;
     const card = event.target.closest(".photo");
     if (!card || (event.key !== " " && event.key !== "Enter")) return;
     if (event.target.closest("a, button, input, summary, details")) return;
@@ -3789,7 +3973,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         openLine(line);
       }
     } else if (event.key === " ") {
-      if (currentScope === "all") return;
+      if (currentScope !== "missing") return;
       const line = focusedLine();
       if (line !== null && document.activeElement.closest(".photo")) {
         event.preventDefault();
@@ -3827,6 +4011,15 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     button.addEventListener("click", () => save(true));
   });
   search.addEventListener("input", render);
+  wikidataReach.addEventListener("click", () => {
+    if (!allPhotosAvailable || !wikidataPhotos.length) return;
+    currentScope = "wikidata";
+    currentMode = "all";
+    wikidataReach.setAttribute("aria-pressed", "true");
+    status.textContent = `Showing ${wikidataPhotos.length} photos used on Wikidata.`;
+    render();
+    sections.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
   modeButtons.forEach((button) => {
     button.addEventListener("click", () => {
       currentMode = button.dataset.mode;
@@ -3843,10 +4036,13 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       if (button.disabled || button.dataset.scope === currentScope) return;
       currentScope = button.dataset.scope;
       currentMode = "all";
+      wikidataReach.setAttribute("aria-pressed", currentScope === "wikidata" ? "true" : "false");
       lastFocusedLine = currentItems().length ? currentItems()[0].line : null;
       status.textContent = currentScope === "all"
         ? "Showing all your photos on Wikipedia."
-        : "Showing photos missing your Wikimedia Commons category.";
+        : currentScope === "wikidata"
+          ? `Showing ${wikidataPhotos.length} photos used on Wikidata.`
+          : "Showing photos missing your Wikimedia Commons category.";
       render();
     });
   });
@@ -4039,6 +4235,12 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     ambiguous_count = len([item for item in items if not item["target"]])
     scan_metrics = review_scan_metrics(review, fallback_missing=len(approvable))
     all_photos = load_all_photos_cache(review, items)
+    if all_photos is not None:
+        cached_by_title = {item["title"]: item for item in all_photos}
+        for item in items:
+            cached = cached_by_title.get(item["title"])
+            if cached:
+                item["wikidata_items"] = cached.get("wikidata_items", [])
     if (all_photos is None and
             scan_metrics.get("in_use_total") == len(approvable)):
         all_photos = [dict(item, checked=False) for item in approvable]
@@ -4369,6 +4571,10 @@ def cmd_scan(args):
     print("  %d possible matches. Fetching usage, categories, wikitext..." % candidate_count,
           file=sys.stderr)
     info = fetch_details(cl, reasons.keys(), by_cat, of_cat)
+    wikidata_total = sum(len(rec.get("wd", {})) for rec in info.values())
+    if wikidata_total:
+        print("  resolving %d Wikidata item use(s)..." % wikidata_total, file=sys.stderr)
+        fetch_wikidata_usage_labels(info.values())
 
     depicts = set()
     if qid and of_cat:
@@ -6226,6 +6432,12 @@ def check_web_review_html():
             {"title": "Beispielartikel", "url": "https://de.wikipedia.org/wiki/Beispielartikel",
              "wiki": "de.wikipedia.org", "lang": "de"},
         ],
+        "wikidata_items": [
+            {"id": "Q123", "label": "Example person",
+             "url": "https://www.wikidata.org/wiki/Q123"},
+            {"id": "Q456", "label": "Example event",
+             "url": "https://www.wikidata.org/wiki/Q456"},
+        ],
     }
     scan_metrics = {
         "in_use_total": 8,
@@ -6278,10 +6490,12 @@ def check_web_review_html():
             "Your Wikipedia reach and category progress",
             'data-scope="missing"',
             'data-scope="all"',
+            'data-scope="wikidata"',
             "photos missing your Wikimedia Commons category",
             "all ${allPhotosTotal.toLocaleString(\"en-US\")} of your photos on Wikipedia",
             'missingScopePrefix.textContent = currentScope === "missing" ? "Viewing" : "View"',
             'allScopePrefix.textContent = currentScope === "all" ? "Viewing" : "View"',
+            'wikidataScopePrefix.textContent = currentScope === "wikidata" ? "Viewing" : "View"',
             ".scope-tab-prefix {",
             "width: 3.75em",
             "all-photos-view",
@@ -6290,9 +6504,15 @@ def check_web_review_html():
             ".app-shell.all-photos-view .action-rail > :not(.all-photos-rail)",
             ".picker-shell > .product-header {\n  position: static;",
             "Your complete Wikipedia gallery.",
+            "Your Wikidata photo gallery.",
             'id="all-rail-photo-count"',
             "including photos already in your photographer category",
             "reach-row",
+            "wikidata-reach",
+            "Beyond Wikipedia",
+            "wikidataPhotos.length",
+            "wikidataItemIds.size",
+            "Showing ${wikidataPhotos.length} photos used on Wikidata.",
             "icon-tabler-camera",
             "icon-tabler-brand-wikipedia",
             "icon-tabler-world",
@@ -6307,6 +6527,10 @@ def check_web_review_html():
             "a category before",
             "Choose photos to add",
             "Your photo appears in:",
+            "Also used on Wikidata · ${wikidataItems.length} ${noun}",
+            "wikidata-disclosure",
+            "Example person",
+            "https://www.wikidata.org/wiki/Q123",
             "photo-caption",
             "photo-title",
             "photo-image",
