@@ -73,7 +73,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.11"
+__version__ = "1.1.12"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -1363,7 +1363,7 @@ def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
 <title>Credit Check — Your photos on Wikipedia</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..800&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400..800&amp;family=Libre+Caslon+Text:wght@400;700&amp;display=swap">
 <style>
 :root {
   color-scheme: light;
@@ -2159,6 +2159,7 @@ body {
   letter-spacing: -0.06em;
   font-variant-numeric: tabular-nums;
 }
+
 .reach-label {
   color: var(--ink);
   font-size: 19px;
@@ -2624,45 +2625,12 @@ button.primary:focus-visible {
   background: linear-gradient(180deg, #fbfbf8 0%, #f7f7f2 100%);
   border-left: 1px solid var(--line);
 }
-.rail-intro,
 .preview-panel {
   padding: 2px 4px 0;
   background: transparent;
   border: 0;
   border-radius: 0;
   box-shadow: none;
-}
-.rail-intro h2 {
-  margin: 8px 0 8px;
-  font-size: 21px;
-  line-height: 1.22;
-  letter-spacing: -0.02em;
-}
-.rail-intro > #rail-state-copy {
-  margin: 0;
-  color: var(--muted);
-  font-size: 14px;
-}
-.selection-flow {
-  display: grid;
-  grid-template-columns: auto 18px minmax(0, 1fr);
-  gap: 8px;
-  align-items: center;
-  margin-top: 16px;
-  padding: 12px 0;
-  color: var(--accent-strong);
-  border-top: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
-  font-size: 13px;
-}
-.selection-flow[hidden] {
-  display: none;
-}
-.selection-flow strong {
-  font-size: 14px;
-}
-.selection-flow span:last-child {
-  overflow-wrap: anywhere;
 }
 .target-card {
   display: block;
@@ -2710,9 +2678,6 @@ button.primary:focus-visible {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-}
-.target-card .target-card-action [aria-hidden="true"] {
-  display: inline;
 }
 .preview-panel {
   display: grid;
@@ -2917,11 +2882,17 @@ button.primary:focus-visible {
     border-top: 1px solid var(--line);
     border-left: 0;
   }
-  .rail-intro,
+  .preview-panel,
   .target-card {
     min-height: 100%;
   }
-  .preview-panel,
+  .preview-panel {
+    grid-column: 1;
+  }
+  .target-card {
+    grid-column: 2;
+  }
+  .all-photos-rail,
   .rail-actions {
     grid-column: 1 / -1;
   }
@@ -3023,6 +2994,7 @@ button.primary:focus-visible {
     padding: 0 14px 24px;
   }
   .preview-panel,
+  .target-card,
   .rail-actions {
     grid-column: auto;
   }
@@ -3057,6 +3029,277 @@ button.primary:focus-visible {
     padding-top: 22px;
   }
 }
+/* Editorial ledger adaptation, based on the approved Claude handoff. */
+.picker-shell {
+  border-color: #e4e3da;
+  border-radius: 10px;
+  box-shadow: 0 30px 80px -56px rgba(20, 50, 40, 0.9);
+}
+.picker-shell > .product-header { padding: 28px 34px 0; }
+.product-lockup { align-items: flex-end; padding-bottom: 22px; }
+.product-heading { min-width: 0; }
+.product-tagline { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.35; }
+.product-credit-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.product-credit { gap: 7px; font-size: 16px; font-weight: 650; }
+.product-credit .wikiportraits-link span { font-size: 21px; font-weight: 800; letter-spacing: -0.02em; }
+.product-mission { color: var(--muted); font-size: 16px; font-weight: 650; line-height: 1.3; }
+.wikiportraits-logo { width: 48px; height: 48px; }
+.picker-controls,
+.picker-shell .picker-main { padding-right: 34px; padding-left: 34px; }
+.picker-controls { padding-bottom: 0; border-bottom: 0; }
+.task-row { margin-top: 38px; }
+.task-title { color: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: 0.15em; text-transform: uppercase; }
+.reach-overview { display: block; margin-top: 18px; }
+.scan-metrics { width: 100%; max-width: none; overflow: visible; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+.reach-statement { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; }
+.reach-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 14px 13px;
+  align-items: center;
+  min-height: 0;
+  padding: 20px 30px 22px 0;
+  border-top: 2px solid var(--ink);
+}
+.reach-row + .reach-row {
+  padding-left: 30px;
+  border-top: 2px solid var(--ink);
+  border-left: 0;
+  background: linear-gradient(to bottom, var(--line) 0, rgba(222, 222, 214, 0.7) 76px, transparent 112px) left top / 1px 100% no-repeat;
+}
+.reach-row strong {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  color: var(--accent-strong);
+  font-family: "Libre Caslon Text", Georgia, serif;
+  font-size: clamp(60px, 6vw, 82px);
+  font-weight: 400;
+  line-height: 0.86;
+  letter-spacing: -0.035em;
+}
+.reach-icon {
+  grid-column: 1;
+  grid-row: 2;
+  width: 46px;
+  height: 46px;
+  color: var(--accent-strong);
+  background: rgba(23, 107, 73, 0.07);
+  border-color: rgba(23, 107, 73, 0.14);
+  border-radius: 11px;
+}
+.reach-icon svg { width: 28px; height: 28px; }
+.reach-icon img { width: 30px; height: 30px; }
+.reach-label { grid-column: 2; grid-row: 2; display: grid; gap: 2px; color: var(--ink); font-size: 16px; font-weight: 750; line-height: 1.2; }
+.reach-sub { color: var(--muted); font-size: 12px; font-weight: 500; line-height: 1.3; }
+.wikidata-reach { grid-template-columns: 24px minmax(0, 1fr); gap: 10px; margin-top: 0; padding: 14px 0 0; background: transparent; border-top-color: var(--line); }
+.wikidata-reach-icon { width: 24px; height: 24px; background: transparent; }
+.wikidata-reach-icon img { width: 18px; height: 18px; }
+.wikidata-reach-copy { display: flex; align-items: baseline; gap: 8px; }
+.wikidata-reach-kicker { color: var(--accent); }
+.workboard { margin: 28px 34px 44px; overflow: hidden; background: #fff; border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 24px 58px -46px rgba(20, 50, 40, 0.8); }
+.picker-content { border-right: 8px solid var(--panel-soft); border-left: 8px solid var(--panel-soft); }
+.scope-panel { display: block; background: #fff; }
+.scope-tabs { gap: 6px; width: 100%; padding: 8px 0 0; background: var(--panel-soft); border: 0; border-bottom: 1px solid var(--line-strong); border-radius: 0; }
+.scope-tab {
+  position: relative;
+  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  justify-items: start;
+  gap: 3px 13px;
+  min-height: 76px;
+  margin-bottom: -1px;
+  padding: 12px 15px 13px;
+  border-radius: 10px 10px 0 0;
+  text-align: left;
+}
+.scope-tab-icon { grid-row: 1 / 3; width: 40px; height: 40px; border-radius: 10px; }
+.scope-tab-icon svg,
+.scope-tab-icon img { width: 23px; height: 23px; }
+.scope-tab-copy { grid-column: 2; grid-row: 1 / 3; align-self: center; gap: 3px; }
+.scope-tab-title { font-size: 14px; }
+.scope-tab-meta { font-size: 12px; }
+.scope-tab.active { z-index: 1; border-color: var(--line-strong); border-bottom-color: #fff; box-shadow: 0 -8px 20px -18px rgba(20, 50, 40, 0.65); }
+.scope-tab.tab-add .scope-tab-icon { color: #a32e29; background: rgba(163, 46, 41, 0.09); }
+.scope-tab.tab-all .scope-tab-icon { color: #2d8b60; background: rgba(45, 139, 96, 0.1); }
+.scope-tab.tab-wikidata .scope-tab-icon { background: rgba(47, 111, 176, 0.1); }
+.scope-tab.tab-add.active .scope-tab-icon { color: #fff; background: #a32e29; }
+.scope-tab.tab-all.active .scope-tab-icon { color: #fff; background: #2d8b60; }
+.scope-tab.tab-wikidata.active .scope-tab-icon { background: #eaf2fb; box-shadow: inset 0 0 0 1px rgba(47, 111, 176, 0.22); }
+.scope-tab.tab-add.active .scope-tab-title { color: #8d2925; }
+.scope-tab.tab-all.active .scope-tab-title { color: #24754f; }
+.scope-tab.tab-wikidata.active .scope-tab-title { color: #2f6fb0; }
+.scope-tab.tab-add.active .scope-tab-meta { color: #8d2925; }
+.scope-tab.tab-all.active .scope-tab-meta { color: #24754f; }
+.scope-tab.tab-wikidata.active .scope-tab-meta { color: #2f6fb0; }
+.workboard-body { padding: 22px 28px 25px; background: #fff; border-right: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); border-left: 1px solid var(--line-strong); }
+.scope-description { width: auto; margin: 0 0 20px; padding-bottom: 18px; color: var(--muted); border-bottom: 1px solid var(--line); font-size: 13px; }
+.missing-category-statement { margin-top: 0; font-size: 17px; letter-spacing: -0.01em; }
+.missing-category-statement strong { font-size: inherit; }
+.scan-metrics-note { margin-top: 5px; font-size: 13px; }
+.review-counts { margin-top: 16px; }
+.primary-tools { margin-top: 14px; }
+.bulk-tools { margin-top: 10px; }
+.keyboard-hint { margin-left: auto; }
+.picker-main { padding-top: 28px; padding-bottom: 44px; background: #fff; border-right: 1px solid var(--line-strong); border-left: 1px solid var(--line-strong); }
+.section-heading { align-items: baseline; margin-bottom: 6px; padding-top: 2px; }
+.section-heading h2 { font-size: 22px; }
+.grid { gap: 26px 22px; }
+.photo { border-radius: 6px; box-shadow: 0 18px 40px -34px rgba(20, 50, 40, 0.8); transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+.photo:hover,
+.photo:focus-visible { transform: translateY(-3px); box-shadow: 0 26px 52px -34px rgba(20, 50, 40, 0.85); }
+.thumb { aspect-ratio: 4 / 5; }
+.photo-use-badge {
+  position: absolute;
+  z-index: 3;
+  top: 13px;
+  right: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  color: #fff;
+  background: rgba(23, 32, 27, 0.82);
+  border-radius: 999px;
+  backdrop-filter: blur(4px);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+.photo-use-badge strong { font-size: 12px; font-weight: 800; }
+.photo-title { min-height: 0; padding: 19px 20px 5px; background: #fff; border-bottom: 0; }
+.photo-title::after { display: none; }
+.photo-caption { font-family: "Libre Caslon Text", Georgia, serif; font-size: 19px; font-weight: 700; line-height: 1.14; letter-spacing: -0.015em; -webkit-line-clamp: 3; }
+.photo-content { gap: 6px; padding: 12px 20px 20px; }
+.used-label { margin-bottom: 3px; font-size: 10px; }
+.article-preview-list { gap: 0; }
+.article-preview-list li { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.article-preview-list a { font-size: 14px; }
+.article-dialog-trigger { margin-top: 7px; }
+.other-language-disclosure { margin-top: 3px; }
+.wikidata-disclosure { margin-top: 8px; }
+.wikidata-disclosure > summary { display: flex; align-items: center; gap: 7px; color: #2f6fb0; font-weight: 650; }
+.wikidata-disclosure-mark { display: grid; flex: 0 0 auto; place-items: center; width: 19px; height: 19px; background: #eaf2fb; border: 1px solid rgba(47, 111, 176, 0.18); border-radius: 5px; }
+.wikidata-disclosure-mark img { display: block; width: 13px; height: 13px; object-fit: contain; }
+.photo-details { margin-top: 8px; }
+.action-rail { gap: 22px; padding: 38px 28px 28px; background: #fff; border-left-color: var(--line-strong); }
+.target-card {
+  position: relative;
+  overflow: hidden;
+  padding: 20px;
+  color: var(--ink);
+  background: radial-gradient(130% 100% at 100% 0%, rgba(255, 255, 255, 0.72), transparent 58%), linear-gradient(145deg, #f4f8f5, #eaf2ec);
+  border: 1px solid rgba(23, 107, 73, 0.18);
+  border-radius: 9px;
+  box-shadow: 0 14px 30px -30px rgba(20, 50, 40, 0.7);
+}
+.target-card[href]:hover,
+.target-card[href]:focus-visible { color: var(--ink); background: linear-gradient(145deg, #f7faf8, #e5efe8); box-shadow: 0 17px 34px -29px rgba(20, 50, 40, 0.75); outline-color: rgba(23, 107, 73, 0.2); }
+.target-card > :not(.target-card-watermark) { position: relative; z-index: 1; }
+.target-card > p { color: var(--accent); }
+.target-card h2 { color: var(--accent-strong); font-family: "Libre Caslon Text", Georgia, serif; font-size: 23px; }
+.target-card .target-card-description { max-width: 31ch; color: #52675c; font-size: 12px; }
+.target-card .target-card-action { margin-top: 15px; padding: 0; color: var(--accent-strong); background: transparent; border: 0; border-radius: 0; font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
+.target-card-watermark { position: absolute; right: -25px; bottom: -28px; width: 130px; opacity: 0.08; pointer-events: none; }
+.preview-panel.review-tray { display: grid; gap: 14px; overflow: hidden; padding: 17px; background: #fff; border: 1px solid rgba(23, 107, 73, 0.28); border-radius: 8px; box-shadow: 0 16px 34px -30px rgba(20, 50, 40, 0.8); }
+.selection-title { margin: 0; color: var(--ink); font-size: 22px; line-height: 1.18; letter-spacing: -0.02em; }
+.review-tray .edit-receipt { margin: 0; }
+.review-tray .edit-receipt[hidden] { display: none; }
+.review-tray .edit-receipt > summary { display: flex; align-items: center; justify-content: flex-start; min-height: 46px; padding: 10px 14px; color: var(--accent-strong); background: #fff; border: 1px solid rgba(23, 107, 73, 0.4); border-radius: 7px; list-style: none; font-weight: 750; text-decoration: none; }
+.review-tray .edit-receipt > summary::-webkit-details-marker { display: none; }
+.review-tray .edit-receipt > summary::before { width: 0; height: 0; margin-right: 8px; content: ""; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-left: 6px solid currentColor; transition: transform 160ms ease; }
+.review-tray .edit-receipt[open] > summary::before { transform: rotate(90deg); }
+.review-tray .edit-receipt > summary:hover,
+.review-tray .edit-receipt > summary:focus-visible { color: var(--accent-strong); background: var(--selected-soft); text-decoration: none; }
+.details-open-label { display: none; }
+.edit-receipt[open] .details-closed-label { display: none; }
+.edit-receipt[open] .details-open-label { display: inline; }
+.review-tray .preview-edits { margin-top: 12px; }
+.rail-actions { margin-top: 0; }
+.status { color: var(--muted); font-size: 12px; text-align: center; }
+.rail-done { width: 100%; min-height: 46px; color: #fff; background: var(--accent); border-color: var(--accent); border-radius: 7px; box-shadow: 0 12px 28px -18px rgba(14, 107, 69, 0.75); font-weight: 750; }
+.rail-done:hover,
+.rail-done:focus-visible { color: #fff; background: var(--accent-strong); }
+.rail-done:disabled { color: var(--faint); background: var(--panel-soft); border-color: var(--line); box-shadow: none; cursor: not-allowed; }
+.site-credit { display: flex; align-items: center; gap: 12px; padding: 20px 34px; color: var(--muted); background: var(--panel-soft); border-top: 1px solid var(--line); }
+.site-credit img { width: 26px; height: 26px; object-fit: contain; opacity: 0.85; }
+.site-credit p { margin: 0; font-size: 13px; }
+.site-credit strong,
+.site-credit a { color: var(--accent-strong); font-weight: 750; }
+.site-credit a { text-decoration: none; }
+.site-credit a:hover,
+.site-credit a:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
+
+@media (max-width: 1120px) {
+  .reach-row { padding-right: 18px; }
+  .reach-row + .reach-row { padding-left: 18px; }
+  .reach-row strong { font-size: 60px; }
+  .scope-tab { grid-template-columns: 36px minmax(0, 1fr); padding-right: 9px; padding-left: 9px; }
+  .scope-tab-icon { width: 36px; height: 36px; }
+}
+@media (max-width: 900px) {
+  .picker-shell > .product-header,
+  .picker-controls,
+  .picker-shell .picker-main { padding-right: 24px; padding-left: 24px; }
+  .reach-statement { grid-template-columns: 1fr; }
+  .reach-row,
+  .reach-row + .reach-row {
+    grid-template-columns: 46px max-content minmax(0, 1fr);
+    grid-template-rows: auto;
+    gap: 16px;
+    padding: 14px 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    background: none;
+  }
+  .reach-row:first-child { border-top: 2px solid var(--ink); }
+  .reach-row strong { grid-column: 2; grid-row: 1; font-size: 54px; }
+  .reach-icon { grid-column: 1; grid-row: 1; }
+  .reach-label { grid-column: 3; grid-row: 1; }
+  .scope-tabs,
+  .scope-panel,
+  .scope-description { width: 100%; max-width: none; }
+  .workboard { margin: 26px 24px 36px; }
+  .scope-tabs { padding-right: 0; }
+  .action-rail { padding: 28px 24px; }
+  .site-credit { padding-right: 24px; padding-left: 24px; }
+}
+@media (max-width: 620px) {
+  .picker-shell > .product-header,
+  .picker-controls,
+  .picker-shell .picker-main { padding-right: 14px; padding-left: 14px; }
+  .product-lockup { align-items: start; }
+  .product-credit-wrap { align-items: flex-start; }
+  .product-credit { gap: 5px; font-size: 14px; }
+  .product-credit .wikiportraits-link span { font-size: 18px; }
+  .wikiportraits-logo { width: 36px; height: 36px; }
+  .product-mission { font-size: 13px; }
+  .task-row { margin-top: 28px; }
+  .reach-row,
+  .reach-row + .reach-row { grid-template-columns: 34px max-content minmax(0, 1fr); gap: 10px; }
+  .reach-icon { width: 34px; height: 34px; }
+  .reach-icon svg { width: 23px; height: 23px; }
+  .reach-icon img { width: 25px; height: 25px; }
+  .reach-row strong { font-size: 42px; }
+  .reach-label { font-size: 14px; }
+  .reach-sub { font-size: 11px; }
+  .wikidata-reach-copy { display: grid; gap: 1px; }
+  .workboard { margin: 22px 14px 28px; border-radius: 12px; }
+  .picker-content { border-right-width: 5px; border-left-width: 5px; }
+  .scope-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 5px 0 0; }
+  .scope-tab { grid-template-columns: 1fr; grid-template-rows: auto; justify-items: center; gap: 4px; min-height: 86px; padding: 7px 4px; text-align: center; }
+  .scope-tab-icon { grid-column: 1; grid-row: 1; }
+  .scope-tab-copy { grid-column: 1; grid-row: 2; }
+  .scope-tab-title { font-size: 12px; }
+  .scope-tab-meta { font-size: 10px; }
+  .workboard-body { padding: 18px 14px 20px; }
+  .toolbar-row button { flex: 1 1 120px; }
+  .keyboard-hint { margin-left: 0; }
+  .photo-title { padding: 17px 17px 4px; }
+  .photo-content { padding: 11px 17px 18px; }
+  .action-rail { padding: 24px 14px; }
+  .site-credit { align-items: flex-start; padding: 16px 14px; }
+}
 </style>
 </head>
 <body>
@@ -3064,18 +3307,22 @@ button.primary:focus-visible {
   <section class="picker-shell" aria-labelledby="product-title screen-title">
     <header class="product-header">
       <div class="product-lockup">
-        <h1 class="product-title" id="product-title">Credit Check</h1>
-        <span class="product-credit">A free tool from <a class="wikiportraits-link" href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer"><span>WikiPortraits</span><img class="wikiportraits-logo" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt=""></a></span>
+        <div class="product-heading">
+          <h1 class="product-title" id="product-title">Credit Check</h1>
+          <p class="product-tagline">See where your photographs live across Wikipedia.</p>
+        </div>
+        <div class="product-credit-wrap">
+          <span class="product-credit">A free tool from <a class="wikiportraits-link" href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer"><span>WikiPortraits</span><img class="wikiportraits-logo" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt=""></a></span>
+          <span class="product-mission">Built by volunteers, for volunteers</span>
+        </div>
       </div>
     </header>
-    <div class="picker-workspace">
-      <div class="picker-content">
-        <section class="picker-controls" aria-labelledby="screen-title">
-        <div class="header-main">
+    <section class="picker-controls" aria-labelledby="screen-title">
+      <div class="header-main">
           <div class="picker-identity">
             <div class="title-block">
               <div class="title-row task-row">
-                <h2 class="task-title" id="screen-title">Your photos on Wikipedia:</h2>
+                <h2 class="task-title" id="screen-title">Your reach on Wikipedia</h2>
               </div>
               <div class="reach-overview">
                 <div class="scan-metrics" aria-label="Your Wikipedia reach and category progress">
@@ -3083,17 +3330,17 @@ button.primary:focus-visible {
                   <div class="reach-row">
                     <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-camera" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2" /><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0" /></svg></span>
                     <strong id="in-use-count">—</strong>
-                    <span class="reach-label" id="photo-noun">photos</span>
+                    <span class="reach-label"><span id="photo-noun">Photos</span><span class="reach-sub">used on Wikipedia</span></span>
                   </div>
                   <div class="reach-row">
                     <span class="reach-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Wikipedia%27s_W.svg" alt=""></span>
                     <strong id="article-count">—</strong>
-                    <span class="reach-label" id="article-noun">articles</span>
+                    <span class="reach-label"><span id="article-noun">Wikipedia articles</span><span class="reach-sub">distinct article pages</span></span>
                   </div>
                   <div class="reach-row">
                     <span class="reach-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" class="icon icon-tabler icons-tabler-outline icon-tabler-world" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0" /><path d="M3.6 9h16.8" /><path d="M3.6 15h16.8" /><path d="M11.5 3a17 17 0 0 0 0 18" /><path d="M12.5 3a17 17 0 0 1 0 18" /></svg></span>
                     <strong id="wikipedia-count">—</strong>
-                    <span class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>
+                    <span class="reach-label"><span id="wikipedia-noun">Language editions</span><span class="reach-sub">using at least one of your photos</span></span>
                   </div>
                   </div>
                   <div class="wikidata-reach" id="wikidata-reach" hidden>
@@ -3104,43 +3351,48 @@ button.primary:focus-visible {
                     </span>
                   </div>
                 </div>
-                <div class="scope-panel">
-                <div class="scope-tabs" role="tablist" aria-label="Your photo views">
-                  <button type="button" class="scope-tab active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13l-7 7-9-9V4h7l3 3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M18 3v6M15 6h6"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Photos to add</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
-                  <button type="button" class="scope-tab" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
-                  <button type="button" class="scope-tab" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="sections"><span class="scope-tab-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Notification-icon-Wikidata-logo.svg" alt=""></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
-                </div>
-                <p class="scope-description" id="scope-description">Choose photos to add to your photographer category on Wikimedia Commons.</p>
-                </div>
-              </div>
-              <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
-              <p class="scan-metrics-note" id="scan-metrics-note">Distinct article pages across all Wikipedia language editions. Each photo counts once.</p>
-              <div class="review-counts">
-                <p class="result-count" id="result-count"></p>
-                <div class="summary" id="summary"></div>
               </div>
             </div>
           </div>
+        </div>
+    </section>
+    <section class="workboard" aria-label="Photo view workspace">
+      <div class="picker-workspace" id="view-panel" role="tabpanel" aria-labelledby="missing-scope-tab">
+        <div class="picker-content">
+          <div class="scope-panel">
+            <div class="scope-tabs" role="tablist" aria-label="Your photo views">
+              <button type="button" class="scope-tab tab-all" id="all-scope-tab" data-scope="all" role="tab" aria-selected="false" aria-controls="view-panel"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">All your photos</span><span class="scope-tab-meta" id="all-scope-label">— on Wikipedia</span></span></button>
+              <button type="button" class="scope-tab tab-add active" id="missing-scope-tab" data-scope="missing" role="tab" aria-selected="true" aria-controls="view-panel"><span class="scope-tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13l-7 7-9-9V4h7l3 3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M18 3v6M15 6h6"/></svg></span><span class="scope-tab-copy"><span class="scope-tab-title">Photos to add</span><span class="scope-tab-meta" id="missing-scope-label">— photos</span></span></button>
+              <button type="button" class="scope-tab tab-wikidata" id="wikidata-scope-tab" data-scope="wikidata" role="tab" aria-selected="false" aria-controls="view-panel"><span class="scope-tab-icon" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Notification-icon-Wikidata-logo.svg" alt=""></span><span class="scope-tab-copy"><span class="scope-tab-title">On Wikidata</span><span class="scope-tab-meta" id="wikidata-scope-label">— photos · — items</span></span></button>
+            </div>
+          </div>
+          <section class="workboard-body">
+                <p class="scope-description" id="scope-description">Choose photos to add to your photographer category on Wikimedia Commons.</p>
+                <p class="missing-category-statement"><strong id="missing-category-count">—</strong> of your <span id="missing-photo-noun">photos</span> <span id="missing-verb">are</span> still missing your Wikimedia Commons category</p>
+                <p class="scan-metrics-note" id="scan-metrics-note">Article totals count distinct pages across all Wikipedia language editions.</p>
+                <div class="review-counts">
+                  <p class="result-count" id="result-count"></p>
+                  <div class="summary" id="summary"></div>
+                </div>
+                <div class="toolbar-row primary-tools">
+                  <input id="search" type="search" autocomplete="off" aria-label="Filter photos" placeholder="Filter by filename, article, category, or number of Wikipedia articles">
+                  <div class="mode-tabs" role="group" aria-label="Review mode">
+                    <button type="button" data-mode="all">All</button>
+                    <button type="button" data-mode="selected">Selected</button>
+                    <button type="button" data-mode="unselected">Not selected yet</button>
+                  </div>
+                </div>
+                <div class="toolbar-row bulk-tools">
+                  <button type="button" class="secondary" data-action="select-visible">Select shown</button>
+                  <button type="button" class="secondary" data-action="clear-visible">Unselect shown</button>
+                  <button type="button" class="secondary" data-action="select-all">Select all</button>
+                  <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
+                  <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
+                </div>
           <div class="save-actions mobile-save-actions">
-            <button type="button" class="primary" data-action="done">Exit</button>
+            <button type="button" class="rail-done" data-action="done">Continue</button>
           </div>
-        </div>
-        <div class="toolbar-row primary-tools">
-          <input id="search" type="search" autocomplete="off" aria-label="Filter photos" placeholder="Filter by filename, article, category, or number of Wikipedia articles">
-          <div class="mode-tabs" role="group" aria-label="Review mode">
-            <button type="button" data-mode="all">All</button>
-            <button type="button" data-mode="selected">Selected</button>
-            <button type="button" data-mode="unselected">Not selected yet</button>
-          </div>
-        </div>
-        <div class="toolbar-row bulk-tools">
-          <button type="button" class="secondary" data-action="select-visible">Select shown</button>
-          <button type="button" class="secondary" data-action="clear-visible">Unselect shown</button>
-          <button type="button" class="secondary" data-action="select-all">Select all</button>
-          <button type="button" class="secondary" data-action="clear-all">Unselect all</button>
-          <span class="keyboard-hint">Shortcuts: / search, Space select, o open</span>
-        </div>
-        </section>
+          </section>
         <main class="picker-main">
           <div class="notice" id="ambiguous-note"></div>
           <div class="empty" id="empty">No photos match this view.</div>
@@ -3148,38 +3400,23 @@ button.primary:focus-visible {
         </main>
       </div>
       <aside class="action-rail" aria-label="Selection and next step">
-        <div class="rail-intro">
-          <p class="rail-kicker">Your selection</p>
-          <h2 id="rail-state-title">Choose the photos you want to gather under your name.</h2>
-          <p id="rail-state-copy">Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.</p>
-          <div class="selection-flow" id="selection-flow" hidden>
-            <strong id="rail-selected-count"></strong>
-            <span aria-hidden="true">→</span>
-            <span id="rail-flow-target"></span>
-          </div>
-        </div>
         <a class="target-card" id="target-card" target="_blank" rel="noreferrer">
           <p>Your photographer category</p>
           <h2 id="target-summary"></h2>
-          <span class="target-card-action">Open on Wikimedia Commons <span aria-hidden="true">↗</span></span>
+          <span class="target-card-description">Your photographs, gathered under your name on Wikimedia Commons.</span>
+          <span class="target-card-action">View on Wikimedia Commons</span>
+          <img class="target-card-watermark" src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt="" aria-hidden="true">
         </a>
-        <section class="preview-panel" id="preview-panel">
-          <div class="preview-header">
-            <div>
-              <p class="rail-kicker">Ready when you are</p>
-              <h2>Wikimedia Commons edits</h2>
-              <p id="preview-summary"></p>
-            </div>
-          </div>
+        <section class="preview-panel review-tray" id="preview-panel">
+          <h2 class="selection-title" id="rail-state-title">0 photos selected</h2>
           <details class="edit-receipt" id="edit-receipt" hidden>
-            <summary>Review exact Wikimedia Commons edits</summary>
+            <summary><span class="details-closed-label">See details</span><span class="details-open-label">Hide details</span></summary>
             <pre class="preview-edits" id="preview-edits"></pre>
           </details>
-          <p class="next-command" id="next-command"></p>
         </section>
         <div class="rail-actions">
-          <div class="status" id="status" role="status" aria-live="polite"></div>
-          <button type="button" class="primary rail-done" data-action="done">Exit</button>
+          <div class="status" id="status" role="status" aria-live="polite">All changes saved</div>
+          <button type="button" class="rail-done" data-action="done">Continue</button>
         </div>
         <section class="all-photos-rail" aria-label="About this gallery">
           <p class="rail-kicker" id="gallery-rail-kicker">All your photos</p>
@@ -3188,7 +3425,12 @@ button.primary:focus-visible {
           <p id="gallery-rail-guidance">Switch to the missing-category tab to choose photos to add.</p>
         </section>
       </aside>
-    </div>
+      </div>
+    </section>
+    <footer class="site-credit">
+      <img src="https://custom-images.strikinglycdn.com/res/hrscywv4p/image/upload/c_limit,fl_lossy,h_300,w_300,f_auto,q_auto/60063/415018_168019.png" alt="" aria-hidden="true">
+      <p>Credit Check is a free tool built by <strong>Jay Dixit</strong> of the <a href="https://www.wikiportraits.org/" target="_blank" rel="noreferrer">WikiPortraits</a> community.</p>
+    </footer>
   </section>
 </div>
 <dialog class="article-dialog" id="article-dialog" aria-labelledby="article-dialog-title" aria-describedby="article-dialog-description">
@@ -3244,6 +3486,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const search = document.getElementById("search");
   const modeButtons = Array.from(document.querySelectorAll("[data-mode]"));
   const scopeButtons = Array.from(document.querySelectorAll("[data-scope]"));
+  const viewPanel = document.getElementById("view-panel");
   const missingScopeTab = document.getElementById("missing-scope-tab");
   const allScopeTab = document.getElementById("all-scope-tab");
   const missingScopeText = document.getElementById("missing-scope-label");
@@ -3258,6 +3501,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const wikidataPhotoCount = document.getElementById("wikidata-photo-count");
   const wikidataItemCount = document.getElementById("wikidata-item-count");
   const missingCategoryCount = document.getElementById("missing-category-count");
+  const missingCategoryStatement = document.querySelector(".missing-category-statement");
   const photoNoun = document.getElementById("photo-noun");
   const articleNoun = document.getElementById("article-noun");
   const wikipediaNoun = document.getElementById("wikipedia-noun");
@@ -3265,23 +3509,17 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const missingVerb = document.getElementById("missing-verb");
   const scanMetricsNote = document.getElementById("scan-metrics-note");
   const ambiguousNote = document.getElementById("ambiguous-note");
-  const previewSummary = document.getElementById("preview-summary");
   const previewEdits = document.getElementById("preview-edits");
   const editReceipt = document.getElementById("edit-receipt");
-  const nextCommand = document.getElementById("next-command");
   const targetSummary = document.getElementById("target-summary");
   const targetCard = document.getElementById("target-card");
   const railStateTitle = document.getElementById("rail-state-title");
-  const railStateCopy = document.getElementById("rail-state-copy");
-  const selectionFlow = document.getElementById("selection-flow");
-  const railSelectedCount = document.getElementById("rail-selected-count");
-  const railFlowTarget = document.getElementById("rail-flow-target");
   const allRailPhotoCount = document.getElementById("all-rail-photo-count");
   const galleryRailKicker = document.getElementById("gallery-rail-kicker");
   const galleryRailTitle = document.getElementById("gallery-rail-title");
   const galleryRailDescription = document.getElementById("gallery-rail-description");
   const galleryRailGuidance = document.getElementById("gallery-rail-guidance");
-  const doneButtons = Array.from(document.querySelectorAll('[data-action="done"]'));
+  const continueButtons = Array.from(document.querySelectorAll('[data-action="done"]'));
   const articleDialog = document.getElementById("article-dialog");
   const articleDialogTitle = document.getElementById("article-dialog-title");
   const articleDialogThumb = document.getElementById("article-dialog-thumb");
@@ -3289,7 +3527,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const articleDialogList = document.getElementById("article-dialog-list");
   const targets = Array.from(new Set(items.map((item) => item.target)));
   const singleTarget = targets.length === 1;
-  const ENGLISH_ARTICLE_LIMIT = 5;
+  const ENGLISH_ARTICLE_LIMIT = 4;
   const wikipediaLanguageNames = {
     "als": "Alemannic",
     "bat-smg": "Samogitian",
@@ -3320,7 +3558,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let selectionRevision = 0;
   let articleDialogOpener = null;
 
-  screenTitle.textContent = "Your photos on Wikipedia:";
+  screenTitle.textContent = "Your reach on Wikipedia";
   const metricValues = [
     scanMetrics.in_use_total,
     scanMetrics.article_total,
@@ -3331,11 +3569,13 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     inUseCount.textContent = scanMetrics.in_use_total.toLocaleString("en-US");
     articleCount.textContent = scanMetrics.article_total.toLocaleString("en-US");
     wikipediaCount.textContent = scanMetrics.wikipedia_total.toLocaleString("en-US");
-    photoNoun.textContent = scanMetrics.in_use_total === 1 ? "photo" : "photos";
-    articleNoun.textContent = scanMetrics.article_total === 1 ? "article" : "articles";
+    photoNoun.textContent = scanMetrics.in_use_total === 1 ? "Photo" : "Photos";
+    articleNoun.textContent = scanMetrics.article_total === 1
+      ? "Wikipedia article"
+      : "Wikipedia articles";
     wikipediaNoun.textContent = scanMetrics.wikipedia_total === 1
-      ? "Wikipedia language edition"
-      : "Wikipedia language editions";
+      ? "Language edition"
+      : "Language editions";
   } else {
     scanMetricsNote.textContent = "Scan again to calculate your complete Wikipedia reach.";
   }
@@ -3563,7 +3803,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       return `<li><a href="${escapeHtml(entry.url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}${id}</a></li>`;
     }).join("");
     return `<details class="wikidata-disclosure">
-      <summary>Also used on Wikidata · ${wikidataItems.length} ${noun}</summary>
+      <summary><span class="wikidata-disclosure-mark" aria-hidden="true"><img src="https://commons.wikimedia.org/wiki/Special:Redirect/file/Notification-icon-Wikidata-logo.svg" alt=""></span><span>Also used on Wikidata · ${wikidataItems.length} ${noun}</span></summary>
       <ul class="article-list wikidata-list">${rows}</ul>
     </details>`;
   }
@@ -3594,6 +3834,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     const selectionLabel = item.selected ? `Unselect ${item.label}` : `Select ${item.label}`;
     const caption = String(item.caption || "").trim();
     const photoTitle = caption || filenamePhotoTitle(item.label);
+    const articleTotal = (item.articles || []).length;
+    const articleBadge = articleTotal
+      ? `<span class="photo-use-badge"><strong>${articleTotal.toLocaleString("en-US")}</strong> ${articleTotal === 1 ? "article" : "articles"}</span>`
+      : "";
     const captionLine = photoTitle
       ? `<div class="photo-title"><p class="photo-caption" title="${escapeHtml(photoTitle)}">${escapeHtml(photoTitle)}</p></div>`
       : "";
@@ -3602,14 +3846,15 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
           <span class="select-indicator" aria-hidden="true">✓</span>
         </label>`;
     return `<article class="photo${selectedClass}${readOnly ? " read-only" : ""}"${readOnly ? "" : ' tabindex="0"'} data-line="${item.line}" data-file-url="${escapeHtml(item.file_url)}">
-      ${captionLine}
       <div class="photo-image">
         ${selectionControl}
+        ${articleBadge}
         <a class="thumb" href="${escapeHtml(item.file_url)}" target="_blank" rel="noreferrer">
           <span class="thumb-placeholder">Loading thumbnail</span>
           <img src="${escapeHtml(item.thumb_url)}" loading="lazy" alt="">
         </a>
       </div>
+      ${captionLine}
       <div class="photo-content">
         <p class="used-label">Your photo appears in:</p>
         ${articleHtml(item)}
@@ -3681,24 +3926,30 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       const active = button.dataset.scope === currentScope;
       button.classList.toggle("active", active);
       button.setAttribute("aria-selected", active ? "true" : "false");
+      if (active) viewPanel.setAttribute("aria-labelledby", button.id);
     });
     scopeDescription.textContent = currentScope === "all"
       ? "Browse every photo from this scan, including photos already in your category."
       : currentScope === "wikidata"
         ? "See which of your photos are used on Wikidata items."
         : "Choose photos to add to your photographer category on Wikimedia Commons.";
+    missingCategoryStatement.hidden = currentScope !== "missing";
+    scanMetricsNote.hidden = currentScope !== "missing";
+    search.placeholder = currentScope === "wikidata"
+      ? "Filter by filename, Wikipedia article, or Wikidata item"
+      : "Filter by filename, article, category, or number of Wikipedia articles";
     appShell.classList.toggle("all-photos-view", currentScope !== "missing");
     ambiguousNote.hidden = currentScope !== "missing";
     if (currentScope === "wikidata") {
       galleryRailKicker.textContent = "Wikidata view";
       galleryRailTitle.textContent = "Your Wikidata photo gallery.";
       galleryRailDescription.textContent = `${wikidataPhotos.length} photos used across ${wikidataItemIds.size} Wikidata items.`;
-      galleryRailGuidance.textContent = "Choose All Wikipedia photos above to return to the complete gallery.";
+      galleryRailGuidance.textContent = "Choose All your photos above to return to the complete gallery.";
     } else {
       galleryRailKicker.textContent = "All your photos";
       galleryRailTitle.textContent = "Your complete Wikipedia gallery.";
       galleryRailDescription.innerHTML = `This read-only view contains all <strong>${allPhotosTotal.toLocaleString("en-US")}</strong> photos from this scan, including photos already in your photographer category.`;
-      galleryRailGuidance.textContent = "Switch to the missing-category tab to choose photos to add.";
+      galleryRailGuidance.textContent = "Choose Photos to add above to return to the selection view.";
     }
   }
 
@@ -3718,42 +3969,22 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     };
   }
 
-  function nextStepText() {
-    if (guidedMode) {
-      return "Click Exit below, then choose Add selected photos to your photographer category page on Wikimedia Commons from the menu.";
-    }
-    return `Next: credit-check commit ${reviewArg} --go`;
-  }
-
   function renderPreview() {
     const selected = selectedItems();
-    if (!selected.length) {
-      railStateTitle.textContent = "Choose the photos you want to gather under your name.";
-      railStateCopy.textContent = "Your choices save automatically. Nothing changes on Wikimedia Commons until you confirm the edits.";
-      selectionFlow.hidden = true;
-      previewSummary.textContent = "No photos selected yet.";
-      previewEdits.textContent = "";
-      editReceipt.hidden = true;
-      nextCommand.textContent = "";
-      doneButtons.forEach((button) => { button.textContent = "Exit"; });
-      return;
-    }
-    const selectedTargets = Array.from(new Set(selected.map((item) => item.target)));
     const photoNoun = selected.length === 1 ? "photo" : "photos";
     railStateTitle.textContent = `${selected.length} ${photoNoun} selected`;
-    railStateCopy.textContent = "Your choices are saved. Review the exact edits below, or keep choosing photos.";
-    railSelectedCount.textContent = `${selected.length} ${photoNoun}`;
-    railFlowTarget.textContent = selectedTargets.length === 1
-      ? selectedTargets[0]
-      : `${selectedTargets.length} Wikimedia Commons categories`;
-    selectionFlow.hidden = false;
-    previewSummary.textContent = `${selected.length} ${selected.length === 1 ? "category edit" : "category edits"} ready for Wikimedia Commons.`;
+    if (!selected.length) {
+      previewEdits.textContent = "";
+      editReceipt.hidden = true;
+      editReceipt.open = false;
+      continueButtons.forEach((button) => { button.disabled = true; });
+      return;
+    }
     previewEdits.textContent = selected.map((item) =>
       `+ [[Category:${item.target}]]  ->  ${item.title}`
     ).join("\\n");
     editReceipt.hidden = false;
-    nextCommand.textContent = nextStepText();
-    doneButtons.forEach((button) => { button.textContent = "Exit"; });
+    continueButtons.forEach((button) => { button.disabled = false; });
   }
 
   function syncThumbnailState(image, failed = false) {
@@ -3954,7 +4185,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         }, 50);
         return true;
       }
-      status.textContent = "Saved";
+      status.textContent = "All changes saved";
       return true;
     } catch (error) {
       pendingSave = false;
@@ -4059,7 +4290,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   document.querySelector('[data-action="clear-all"]').addEventListener("click", () => {
     setSelection(items.map((item) => item.line), false);
   });
-  doneButtons.forEach((button) => {
+  continueButtons.forEach((button) => {
     button.addEventListener("click", () => save(true));
   });
   search.addEventListener("input", render);
@@ -4323,10 +4554,10 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
         print("Review file: %s" % os.path.abspath(review))
     if guided:
         print("If the browser doesn't open, use this URL: %s" % url)
-        print("Use Exit in the browser when you're finished.")
+        print("Use Continue in the browser when you're finished.")
     else:
         print("URL: %s" % url)
-        print("Use Exit in the browser, or press Ctrl-C here to stop.")
+        print("Use Continue in the browser, or press Ctrl-C here to stop.")
 
     if open_browser:
         try:
@@ -5614,7 +5845,7 @@ def check_guided_review_state():
                 os.environ.pop(key, None)
 
 def check_guided_menu_dispatch():
-    for value in ("self_test", "smoke", "scan_by", "scan_of", "review",
+    for value in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "review",
                   "view_all", "settings", "start_over", "add", "quit"):
         check_equal("guided dispatch %s" % value,
                     interactive_choice_action(value), value)
@@ -5638,6 +5869,8 @@ def check_guided_menu_visibility():
             values = [value for _label, value, _desc in interactive_menu_actions(state)]
             if "scan_of" not in values:
                 raise AssertionError("photos-of-you action did not show before setup")
+            if "gaps" not in values:
+                raise AssertionError("Gap Check action did not show before setup")
 
             save_local_preferences({"username": "TestUser", "author": "Test Person"})
             state = review_workflow_state()
@@ -5652,6 +5885,8 @@ def check_guided_menu_visibility():
                         "Find photos *of* you")
             check_equal("start-over guided label", labels.get("start_over"),
                         "Start over with a different photographer")
+            check_equal("Gap Check guided label", labels.get("gaps"),
+                        "Decide which photos to upload next")
 
             zero = {"setup_complete": True, "exists": True, "total": 0,
                     "selected": 0, "ambiguous": 0, "review": "review.md",
@@ -5753,42 +5988,47 @@ def check_guided_menu_copy_matrix():
             "view_all",
             "Open a read-only gallery of every photo from the latest scan that appears on Wikipedia.",
         )
+        gaps = (
+            "Decide which photos to upload next",
+            "gaps",
+            "Rank people whose English Wikipedia lead photo is missing, small, or old.",
+        )
         cases = [
             ("setup needed",
              {"setup_complete": False, "exists": False, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [setup, find, photos_of_you, quit_action]),
+             [setup, find, gaps, photos_of_you, quit_action]),
             ("ready to scan",
              {"setup_complete": True, "exists": False, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md"},
-             [find, settings, start_over, photos_of_you, quit_action]),
+             [find, settings, start_over, gaps, photos_of_you, quit_action]),
             ("caught up",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md",
               "review_mode": "by", "of_category": None,
               "all_photos_total": 8},
-             [caught_up_scan, view_all, settings, start_over, photos_of_you, quit_action]),
+             [caught_up_scan, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
             ("no photos of you",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md",
               "review_mode": "of", "of_category": "Test Person",
               "all_photos_total": 3},
-             [search_of_again, scan_again, view_all, settings, start_over, quit_action]),
+             [search_of_again, scan_again, view_all, settings, start_over, gaps, quit_action]),
             ("choose photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 1, "review": "review.md",
               "all_photos_total": 8},
-             [choose, scan_again, view_all, settings, start_over, photos_of_you, quit_action]),
+             [choose, scan_again, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
             ("selected photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 1, "ambiguous": 0, "review": "review.md",
               "all_photos_total": 8},
-             [add, scan_again, choose, view_all, settings, start_over, photos_of_you, quit_action]),
+             [add, scan_again, choose, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
             ("setup incomplete with photos",
              {"setup_complete": False, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 0, "review": "review.md",
               "all_photos_total": 8},
-             [setup, scan_again, choose, view_all, start_over, photos_of_you, quit_action]),
+             [setup, scan_again, choose, view_all, start_over, gaps, photos_of_you, quit_action]),
         ]
         for name, state, expected in cases:
             check_equal("guided menu copy matrix %s" % name,
@@ -6498,7 +6738,7 @@ def check_web_review_html():
         "review.md", [item], ambiguous_count=2, scan_metrics=scan_metrics,
         all_photos=[item, categorized_item])
     for needle in (
-            "Your photos on Wikipedia:",
+            "Your reach on Wikipedia",
             "Credit Check — Your photos on Wikipedia",
             '<h1 class="product-title" id="product-title">Credit Check</h1>',
             "A free tool from <a class=\"wikiportraits-link\"",
@@ -6507,7 +6747,6 @@ def check_web_review_html():
             "margin-top: 22px",
             "https://www.wikiportraits.org/",
             "wikiportraits-logo",
-            "Your selection",
             "Your photographer category",
             "target-card",
             'id="target-card"',
@@ -6518,7 +6757,6 @@ def check_web_review_html():
             'document.createElement("br")',
             "targetCard.href = commonsCategoryUrl(targets[0])",
             "action-rail",
-            "selection-flow",
             "window.CREDIT_CHECK_ITEMS",
             "window.CREDIT_CHECK_ALL_PHOTOS",
             "window.CREDIT_CHECK_ALL_PHOTOS_AVAILABLE = true",
@@ -6547,6 +6785,9 @@ def check_web_review_html():
             "all-photos-view",
             '${readOnly ? " read-only" : ""}',
             ".picker-workspace {",
+            'id="view-panel" role="tabpanel"',
+            'aria-controls="view-panel"',
+            'viewPanel.setAttribute("aria-labelledby", button.id)',
             ".app-shell.all-photos-view .action-rail > :not(.all-photos-rail)",
             ".picker-shell > .product-header {\n  position: static;",
             "Your complete Wikipedia gallery.",
@@ -6563,26 +6804,31 @@ def check_web_review_html():
             "Wikipedia%27s_W.svg",
             "Notification-icon-Wikidata-logo.svg",
             "icon-tabler-world",
+            "Editorial ledger adaptation",
+            "workboard-body",
+            "photo-use-badge",
+            "Libre Caslon Text",
             'stroke-width="2"',
-            'class="reach-label" id="photo-noun">photos</span>',
-            'class="reach-label" id="article-noun">articles</span>',
-            'class="reach-label" id="wikipedia-noun">Wikipedia language editions</span>',
+            'id="photo-noun">Photos</span><span class="reach-sub">used on Wikipedia</span>',
+            'id="article-noun">Wikipedia articles</span><span class="reach-sub">distinct article pages</span>',
+            'id="wikipedia-noun">Language editions</span><span class="reach-sub">using at least one of your photos</span>',
             "of your",
             "photos</span> <span id=\"missing-verb\">are</span> still missing your Wikimedia Commons category",
-            "Distinct article pages across all Wikipedia language editions. Each photo counts once.",
+            "Article totals count distinct pages across all Wikipedia language editions.",
             "photos ready to review below",
             "a category before",
             "Choose photos to add",
             "Your photo appears in:",
             "Also used on Wikidata · ${wikidataItems.length} ${noun}",
             "wikidata-disclosure",
+            "wikidata-disclosure-mark",
             "Example person",
             "https://www.wikidata.org/wiki/Q123",
             "photo-caption",
             "photo-title",
             "photo-image",
             "grid-template-columns: repeat(3, minmax(0, 1fr))",
-            "family=Instrument+Sans:wght@400..800&amp;display=swap",
+            "family=Instrument+Sans:wght@400..800&amp;family=Libre+Caslon+Text:wght@400;700&amp;display=swap",
             'font: 15px/1.45 "Instrument Sans"',
             "min-height: 144px",
             "font-size: 28px",
@@ -6597,10 +6843,10 @@ def check_web_review_html():
             "captionLine",
             "filenamePhotoTitle",
             "photoTitle",
-            '${captionLine}\n      <div class="photo-image">',
+            '</div>\n      ${captionLine}\n      <div class="photo-content">',
             "return [item.caption, item.label",
             "Example article",
-            "ENGLISH_ARTICLE_LIMIT = 5",
+            "ENGLISH_ARTICLE_LIMIT = 4",
             "View all ${englishArticles.length} English-language Wikipedia articles",
             "+ ${hiddenEnglishCount} more",
             "article-more-count",
@@ -6627,13 +6873,22 @@ def check_web_review_html():
             "Special:FilePath/Example_photo.jpg?width=420",
             "Select shown",
             "data-mode=\"selected\"",
-            "Wikimedia Commons edits",
-            "Review exact Wikimedia Commons edits",
-            "Your choices are saved. Review the exact edits below",
-            "credit-check commit ${reviewArg} --go",
+            'id="rail-state-title">0 photos selected',
+            'id="edit-receipt" hidden',
+            '<span class="details-closed-label">See details</span>',
+            '<span class="details-open-label">Hide details</span>',
+            "View on Wikimedia Commons",
+            "editReceipt.hidden = false",
+            "continueButtons.forEach((button) => { button.disabled = true; })",
+            "continueButtons.forEach((button) => { button.disabled = false; })",
+            "Credit Check is a free tool built by",
+            "site-credit",
+            "tab-add",
+            "tab-all",
+            "tab-wikidata",
             "Shortcuts: / search, Space select, o open",
             'data-action="done"',
-            "Exit",
+            "All changes saved",
             "scheduleSave",
             "selectionRevision",
             "Saving...",
@@ -6647,6 +6902,12 @@ def check_web_review_html():
             raise AssertionError("web review missing %r" % needle)
     if 'data-action="preview"' in text or 'data-action="hide-preview"' in text:
         raise AssertionError("web review should show Wikimedia Commons edits live without preview buttons")
+    if "Review &amp; publish edits" in text or "Review & publish edits" in text:
+        raise AssertionError("web review should not imply that the browser publishes edits")
+    if "selection-flow" in text:
+        raise AssertionError("web review should not repeat the selected count and category")
+    if "inset 0 2px 0" in text or "▤" in text:
+        raise AssertionError("web review should omit the rejected active stripe and placeholder tray glyph")
     if "Also used in" in text:
         raise AssertionError("web review should distinguish English articles from other-language pages")
     if "Plus ${extraEnglish.length} more English-language Wikipedia" in text:
@@ -6655,10 +6916,23 @@ def check_web_review_html():
         raise AssertionError("web review should keep the article dialog description concise")
     if "Every English-language Wikipedia article using this photo." in text:
         raise AssertionError("web review should show photo metadata instead of generic dialog copy")
+    for redundant_copy in (
+            ">Your selection<",
+            ">Next step<",
+            "Your choices are saved. Review the exact edits below",
+            "photos are ready to review",
+            "Review exactly what will be added before you confirm anything.",
+            "Exact Wikimedia Commons edits"):
+        if redundant_copy in text:
+            raise AssertionError("web review should omit redundant selection copy %r" % redundant_copy)
     if 'data-action="save"' in text or 'data-action="save-close"' in text:
-        raise AssertionError("web review should rely on auto-save plus Exit controls")
-    if text.count('data-action="done">Exit</button>') != 2:
-        raise AssertionError("web review should offer desktop and mobile Exit controls")
+        raise AssertionError("web review should rely on auto-save plus Continue controls")
+    if text.count('data-action="done">Continue</button>') != 2:
+        raise AssertionError("web review should offer desktop and mobile Continue controls")
+    if not (text.index('id="target-card"') <
+            text.index('id="preview-panel"') <
+            text.index('class="rail-actions"')):
+        raise AssertionError("web review sidebar should end with selection actions")
     deleted_category_copy = (
         "One place to keep " +
         "track of the Wikipedia articles " +
@@ -6677,10 +6951,6 @@ def check_web_review_html():
         initial_scope="all")
     if 'window.CREDIT_CHECK_INITIAL_SCOPE = "all"' not in all_scope_text:
         raise AssertionError("web review all-photo scope was not embedded")
-    guided_text = web_review_html("review.md", [item], guided=True)
-    if "Click Exit below, then choose Add selected photos to your photographer category page on Wikimedia Commons from the menu." not in guided_text:
-        raise AssertionError("guided web review next step was not embedded")
-
 def check_commit_summary_helpers():
     check_equal("category url",
                 commons_category_url("Photographs by Test Person"),
@@ -7256,6 +7526,33 @@ def cmd_self_test(args):
                                     "Jay Dixit"),
                     False)
 
+    def gap_ranking():
+        from gap_check import score
+
+        check_equal("gap missing lead image",
+                    score({"article": "No Photo", "file": None}, None),
+                    ("P1", "article has no lead image"))
+        check_equal("gap low resolution",
+                    score({"article": "Small", "file": "Small.jpg",
+                           "width": 400, "height": 600},
+                          {"artist": "Other", "uploaded": "2026-01-01T00:00:00Z"}),
+                    ("P2", "lead image is only 400x600"))
+        check_equal("gap configured credit alias",
+                    score({"article": "Mine", "file": "Mine.jpg",
+                           "width": 1600, "height": 1200},
+                          {"artist": "Photo by Test Person", "uploaded": ""},
+                          ("Test Person", "TestUser")),
+                    ("YOURS", "lead image is already yours"))
+        check_equal("gap non-Commons lead",
+                    score({"article": "Local", "file": "Local.jpg",
+                           "width": 1600, "height": 1200}, None),
+                    ("P3", "lead image is not on Wikimedia Commons or has no Commons metadata"))
+        check_equal("gap reasonable lead",
+                    score({"article": "Fine", "file": "Fine.jpg",
+                           "width": 1600, "height": 1200},
+                          {"artist": "Other", "uploaded": ""}),
+                    ("P4", "lead image is recent and reasonable"))
+
     run_check("review format preferences", formats, failures)
     run_check("local review-format preference file", check_review_preferences, failures)
     run_check("HTTP POST retry policy", check_retry_policy, failures)
@@ -7264,6 +7561,7 @@ def cmd_self_test(args):
     run_check("atomic text writes", check_atomic_write_text, failures)
     run_check("photo caption metadata", check_photo_caption_metadata, failures)
     run_check("authorship classification", authorship, failures)
+    run_check("Gap Check ranking", gap_ranking, failures)
     run_check("Markdown review write/parse", lambda: write_and_parse_sample("markdown", ".md"), failures)
     run_check("org review write/parse", lambda: write_and_parse_sample("org", ".org"), failures)
     run_check("of-you review sections", check_of_only_review_sections, failures)
@@ -7763,6 +8061,54 @@ def interactive_preview_and_commit():
 def interactive_commit():
     interactive_preview_and_commit()
 
+def interactive_gap_check():
+    print("")
+    print("Gap Check ranks people whose English Wikipedia lead photo is missing, small, or old.")
+    source = prompt_select(
+        "What do you want to check?",
+        [
+            ("A folder of descriptively named photos", "folder",
+             "Read names from the part of each filename before the first underscore."),
+            ("A text file with one name per line", "file",
+             "Read names from a .txt file."),
+            ("Names you enter now", "names",
+             "Enter one or more names separated by commas."),
+        ],
+    )
+
+    names = []
+    folder = None
+    if source == "folder":
+        folder = os.path.abspath(os.path.expanduser(
+            prompt_text("Photo folder", required=True)))
+        if not os.path.isdir(folder):
+            print("That photo folder does not exist: %s" % folder)
+            return
+    elif source == "file":
+        path = os.path.abspath(os.path.expanduser(
+            prompt_text("Text file", required=True)))
+        if not os.path.isfile(path):
+            print("That text file does not exist: %s" % path)
+            return
+        if not path.lower().endswith(".txt"):
+            print("Gap Check expects a .txt file with one name per line.")
+            return
+        names = [path]
+    else:
+        entered = prompt_text("Names, separated by commas", required=True)
+        names = [name.strip() for name in entered.split(",") if name.strip()]
+        if not names:
+            print("Enter at least one name.")
+            return
+
+    cmd_gaps(argparse.Namespace(
+        names=names,
+        from_filenames=folder,
+        json=False,
+        author=None,
+        username=None,
+    ))
+
 def interactive_menu_actions(state):
     if not state["setup_complete"]:
         primary_value = "settings"
@@ -7828,6 +8174,11 @@ def interactive_menu_actions(state):
             "start_over",
             "Clear saved details and search for a new set of photos.",
         ))
+    actions.append((
+        "Decide which photos to upload next",
+        "gaps",
+        "Rank people whose English Wikipedia lead photo is missing, small, or old.",
+    ))
     if primary_value != "scan_of":
         actions.append((
             "Find photos *of* you",
@@ -7857,7 +8208,7 @@ def interactive_menu_choice():
             questionary.Separator(" "),
         ]
         for idx, (label, value, desc) in enumerate(actions):
-            if idx and value in ("scan_of", "self_test", "quit"):
+            if idx and value in ("gaps", "self_test", "quit"):
                 choices.append(questionary.Separator(" "))
             choices.append(questionary.Choice(label, value=value, description=desc))
         choices.append(questionary.Separator(" "))
@@ -7886,7 +8237,7 @@ def interactive_menu_choice():
     return answer
 
 def interactive_choice_action(choice):
-    if choice in ("self_test", "smoke", "scan_by", "scan_of", "review", "view_all",
+    if choice in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "review", "view_all",
                   "settings", "start_over", "add", "quit"):
         return choice
     if str(choice).lower() in ("q", "quit", "exit"):
@@ -7916,6 +8267,8 @@ def cmd_interactive(args):
             interactive_scan()
         elif action == "scan_of":
             interactive_scan("of")
+        elif action == "gaps":
+            interactive_gap_check()
         elif action == "review":
             interactive_review()
         elif action == "view_all":
@@ -7933,6 +8286,20 @@ def cmd_interactive(args):
 
 
 # ---------------------------------------------------------------- CLI
+
+def cmd_gaps(args):
+    from gap_check import run
+
+    credit_names = [
+        args.author or identity_default("author", "WIKI_AUTHOR"),
+        args.username or identity_default("username", "WIKI_USERNAME"),
+    ]
+    try:
+        run(args.names, args.from_filenames, args.json, credit_names)
+    except ValueError as error:
+        print("credit-check gaps: error: %s" % error, file=sys.stderr)
+        raise SystemExit(2)
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -8013,6 +8380,22 @@ def main():
     sm.add_argument("--keep", action="store_true",
                     help="keep the temporary smoke review file")
     sm.set_defaults(func=cmd_smoke)
+
+    g = sub.add_parser(
+        "gaps",
+        help="rank people whose English Wikipedia lead photo needs improvement",
+    )
+    g.add_argument("names", nargs="*",
+                   help="names, or a .txt file with one name per line")
+    g.add_argument("--from-filenames", metavar="DIR",
+                   help="read names out of a folder of photos")
+    g.add_argument("--json", action="store_true",
+                   help="emit JSON instead of a table")
+    g.add_argument("--author",
+                   help="your credited name (defaults to saved Credit Check settings)")
+    g.add_argument("--username",
+                   help="your Wikimedia Commons username (defaults to saved settings)")
+    g.set_defaults(func=cmd_gaps)
 
     args = ap.parse_args()
     try:
