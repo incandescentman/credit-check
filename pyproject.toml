@@ -23,6 +23,11 @@ dependencies = [
     "questionary>=2,<3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/incandescentman/credit-check"
+Source = "https://github.com/incandescentman/credit-check"
+Changelog = "https://github.com/incandescentman/credit-check/blob/main/CHANGELOG.org"
+
 [project.scripts]
 credit-check = "credit_check:main"
 

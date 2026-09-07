@@ -1,0 +1,26 @@
+#+TITLE: Credit Check Changelog
+#+STARTUP: content
+
+* v1.2.0 — September 6, 2026
+
+** Added
+
+- Added ~credit-check report~ and *Create a reach report* in the guided menu, with HTML, JSON, and CSV exports.
+- Added dated scan snapshots that preserve previous reviews and identify added or removed photos and article placements between scans with matching settings.
+- Added optional Wikipedia article pageviews, monthly totals, and photo rankings. Overall totals count each article once, including articles that contain multiple photos.
+- Added a report link and scan-date and change information to the browser picker.
+
+** Changed
+
+- Reduced the mobile picker’s header and control spacing so photos appear earlier on the page.
+- Changed pageview fetching to one request at a time by default. Throttling stops further requests while preserving completed results.
+- Distinguished missing, failed, and deferred pageview measurements from measured zeroes.
+- Kept older saved reviews readable without inventing a scan date or missing Wikidata information.
+
+** Fixed
+
+- Fixed photographer attribution accepting a credit for retouching, cropping, or editing alone. Direct photographer credit and credit traced through a source photograph remain supported.
+- Fixed reloaded picker pages showing outdated selections.
+- Prevented older tabs and delayed saves from overwriting newer selections.
+- Fixed picker CSS overriding hidden controls.
+- Fixed Gap Check treating missing artist, license, dimensions, or upload-date information as sufficient for a conclusive ranking. These candidates now stay in the uncertain priority band.

@@ -4,6 +4,8 @@
 
 [[https://img.shields.io/badge/License-MIT-2e7d4f.svg]] [[https://img.shields.io/badge/Python-3.8%2B-3776ab.svg]] [[https://img.shields.io/badge/from-WikiPortraits-0e6b45.svg]]
 
+[[file:CHANGELOG.org][Changelog — new features, changes, and fixes]]
+
 Credit Check gives you a way to see where all your photos are being used on Wikipedia and Wikidata.
 
 Credit Check is a free tool from WikiPortraits for Wikimedia Commons photographers. It searches Wikipedia articles across all languages, finds which Wikipedia articles use your photos, and gives you a way to collect all your photos on a special "photographer category" page on Wikimedia Commons — something like =Photographs by Jay Dixit= — so you can see them all in one place.
