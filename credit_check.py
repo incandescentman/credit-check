@@ -54,6 +54,7 @@ direct script mode falls back to plain prompts if they are unavailable.
 
 import argparse, builtins, calendar, concurrent.futures, datetime, getpass, html, http.cookiejar, http.server, io, json, os, re, secrets, shlex, shutil, sys, tempfile, textwrap, threading, time, webbrowser
 import urllib.parse, urllib.request, urllib.error
+import hashlib
 
 try:
     import questionary
@@ -74,7 +75,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -702,6 +703,153 @@ VIEWS_METRIC_KEYS = (
     "views_mainpage_lookup_failed",
     "views_excluded_photos",
 )
+
+IMAGE_REQUESTS_API = "https://wikimedia.org/api/rest_v1/metrics/mediarequests/per-file"
+IMAGE_REQUESTS_CACHE_FILE = ".credit-check-image-requests.json"
+IMAGE_REQUESTS_METRIC_KEYS = tuple("image_requests_" + key for key in (
+    "status", "window_end", "window_months", "last_month", "window_total",
+    "by_month", "files_requested", "files_counted", "files_no_data",
+    "files_failed", "files_deferred", "files_complete", "files_last_month",
+    "by_month_coverage", "referer", "agent", "photos",
+))
+
+
+def image_requests_file_path(title):
+    """Map a canonical Wikimedia Commons scan title to its original upload path.
+
+    MediaWiki's hashed upload layout uses the UTF-8 filename (spaces become
+    underscores), not a hash of the image bytes. Thumbnail sizes roll up to
+    this original file in the mediarequests API.
+    """
+    if not isinstance(title, str) or not title.startswith("File:") or not title[5:]:
+        raise ValueError("Image requests require a canonical File: title")
+    filename = title[5:].replace(" ", "_")
+    digest = hashlib.md5(filename.encode("utf-8")).hexdigest()
+    return "/wikipedia/commons/%s/%s/%s" % (digest[0], digest[:2], filename)
+
+
+def image_requests_url(file_path, start, end):
+    return "%s/all-referers/user/%s/monthly/%s/%s" % (
+        IMAGE_REQUESTS_API, urllib.parse.quote(file_path, safe=""), start, end)
+
+
+def image_requests_metrics(photo_records, months=12, today=None, cache_path=None,
+                           client=None):
+    """Count file requests once per image, independently of article placements.
+
+    Keep absent months unknown: a missing API row is not a measured zero.
+    Sum available measurements and report coverage for each period separately.
+    """
+    labels, start, end = pageviews_window(months, today)
+    files = {}
+    for title, _record in photo_records:
+        files.setdefault(image_requests_file_path(title), title)
+    payload = {"version": 1, "referer": "all-referers", "agent": "user", "files": {}}
+    if cache_path:
+        try:
+            with open(cache_path, encoding="utf-8") as source:
+                saved = json.load(source)
+            if (isinstance(saved, dict) and saved.get("version") == 1
+                    and saved.get("referer") == "all-referers"
+                    and saved.get("agent") == "user" and isinstance(saved.get("files"), dict)):
+                payload = saved
+        except (OSError, ValueError):
+            pass
+    rest_client = client or Client()
+    measured = {}
+    states = {}
+    failed = set()
+    deferred = set()
+    stop_fetching = False
+    dirty = False
+
+    def valid_count(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    for path in sorted(files):
+        cached = payload["files"].get(path, {})
+        if isinstance(cached, dict) and all(valid_count(cached.get(m)) for m in labels):
+            measured[path] = {m: cached[m] for m in labels}
+            states[path] = "complete"
+            continue
+        cached_series = {m: cached[m] for m in labels if valid_count(cached.get(m))} if isinstance(cached, dict) else {}
+        if cached_series:
+            measured[path] = cached_series
+            states[path] = "partial"
+        if stop_fetching:
+            deferred.add(path)
+            states.setdefault(path, "deferred")
+            continue
+        try:
+            response = rest_client.rest_get(image_requests_url(path, start, end), tries=1)
+            if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+                raise ValueError("Missing mediarequests items array")
+            series = {}
+            for item in response["items"]:
+                returned_path = item.get("file_path") if isinstance(item, dict) else None
+                # AQS can return URL-escaped punctuation/Unicode in file_path.
+                # Accept the exact path or one decoding, never repeated decoding.
+                path_matches = isinstance(returned_path, str) and (
+                    returned_path == path or urllib.parse.unquote(returned_path) == path)
+                if (not isinstance(item, dict) or not path_matches
+                        or item.get("agent") != "user"
+                        or item.get("referer") != "all-referers"
+                        or item.get("granularity") != "monthly"
+                        or not valid_count(item.get("requests"))):
+                    raise ValueError("Mediarequests response does not match requested file and filters")
+                timestamp = item.get("timestamp", "")
+                if not isinstance(timestamp, str) or not re.fullmatch(r"\d{6}0100", timestamp):
+                    raise ValueError("Invalid monthly mediarequests timestamp")
+                month = timestamp[:4] + "-" + timestamp[4:6]
+                if month not in labels or month in series:
+                    raise ValueError("Unexpected or duplicate mediarequests month")
+                series[month] = item["requests"]
+            if series:
+                # Preserve previously measured months when extending the window.
+                payload["files"][path] = dict(cached, **series) if isinstance(cached, dict) else series
+                dirty = True
+                measured[path] = dict(cached_series, **series)
+                states[path] = "complete" if len(measured[path]) == len(labels) else "partial"
+            elif path not in measured:
+                states[path] = "no-data"
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                states.setdefault(path, "no-data")
+            else:
+                failed.add(path)
+                states.setdefault(path, "failed")
+                stop_fetching = error.code in (429, 503)
+                print("  image requests failed: %s (HTTP %s)" % (files[path], error.code), file=sys.stderr)
+        except Exception as error:
+            failed.add(path)
+            states.setdefault(path, "failed")
+            print("  image requests failed: %s (%s)" % (files[path], error), file=sys.stderr)
+    if cache_path and dirty:
+        write_views_cache(cache_path, payload)
+    coverage = {m: sum(m in s for s in measured.values()) for m in labels}
+    totals = {m: sum(s[m] for s in measured.values() if m in s) if coverage[m] else None for m in labels}
+    photos = [{
+        "title": title, "commons_url": commons_file_url(title), "status": states[path],
+        "last_month": measured.get(path, {}).get(labels[-1]),
+        "window_total": sum(measured[path].values()) if path in measured else None,
+        "months_counted": len(measured.get(path, {})),
+    } for path, title in files.items()]
+    photos.sort(key=lambda p: (-(p["last_month"] or 0), p["title"].casefold()))
+    result = {
+        "status": "complete" if files and all(states[p] == "complete" for p in files) else "partial" if measured else "unavailable",
+        "window_end": labels[-1], "window_months": months,
+        "last_month": totals[labels[-1]],
+        "window_total": sum(t for t in totals.values() if t is not None) if measured else None,
+        "by_month": [[m, totals[m]] for m in labels] if measured else [],
+        "files_requested": len(files), "files_counted": len(measured),
+        "files_no_data": list(states.values()).count("no-data"),
+        "files_failed": len(failed), "files_deferred": len(deferred),
+        "files_complete": sum(states[p] == "complete" for p in files),
+        "files_last_month": coverage[labels[-1]],
+        "by_month_coverage": [[m, coverage[m]] for m in labels],
+        "referer": "all-referers", "agent": "user", "photos": photos,
+    }
+    return {"image_requests_" + k: v for k, v in result.items()}
 
 
 def shift_month(year, month, delta):
@@ -1355,6 +1503,8 @@ def review_metrics_payload(meta):
     }
     if "views_window_end" in meta:
         metrics.update({key: meta.get(key) for key in VIEWS_METRIC_KEYS})
+    if "image_requests_window_end" in meta:
+        metrics.update({key: meta.get(key) for key in IMAGE_REQUESTS_METRIC_KEYS})
     for key in ("snapshot_id", "scanned_at", "scan_changes"):
         if key in meta:
             metrics[key] = meta[key]
@@ -1586,6 +1736,10 @@ def review_scan_metrics(path, fallback_missing=None):
                     metrics[key] = value
             if isinstance(parsed.get("views_window_end"), str):
                 for key in VIEWS_METRIC_KEYS:
+                    if key in parsed:
+                        metrics[key] = parsed[key]
+            if isinstance(parsed.get("image_requests_window_end"), str):
+                for key in IMAGE_REQUESTS_METRIC_KEYS:
                     if key in parsed:
                         metrics[key] = parsed[key]
             for key in ("snapshot_id", "scanned_at", "scan_changes"):
@@ -3856,6 +4010,15 @@ button.primary:focus-visible {
                     <p id="scan-date">Scan date not recorded</p>
                     <a id="reach-report-link" href="/report" target="_blank" rel="noopener">Open reach report ↗</a>
                   </div>
+                  <section class="pageviews-reach" id="image-requests-reach" aria-label="Image requests" hidden>
+                    <h3>Image requests</h3>
+                    <div class="pageviews-summary" id="image-requests-totals" hidden>
+                      <div class="reach-row"><strong id="image-requests-last-month">—</strong><span class="reach-label">Image requests<span class="reach-sub" id="image-requests-month"></span></span></div>
+                      <div class="reach-row"><strong id="image-requests-window-total">—</strong><span class="reach-label" id="image-requests-window-label"></span></div>
+                    </div>
+                    <p class="scan-changes" id="image-requests-status"></p>
+                    <p class="scan-changes">Requests for your image files across all referring sites, using Wikimedia’s user-classified traffic. These can include preloads; they are not unique people or verified visual impressions. Missing months are omitted; partial totals include only available measurements. Image requests include Main Page appearances.</p>
+                  </section>
                   <p class="scan-changes" id="pageviews-status" hidden></p>
                   <p class="scan-changes" id="pageviews-mainpage-note" hidden></p>
                   <details class="scan-changes" id="pageviews-excluded-photos" hidden>
@@ -4163,7 +4326,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   if (verifiedMainpages) {
     const note = document.getElementById("pageviews-mainpage-note");
     note.hidden = false;
-    note.textContent = "Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them.";
+    note.textContent = "Your Main Page placements stay listed but are excluded from article-view totals because a brief appearance can inflate them.";
     note.textContent += ` Main Pages excluded: ${scanMetrics.views_articles_excluded || 0}.`;
     const lookupFailures = scanMetrics.views_mainpage_lookup_failed || [];
     if (lookupFailures.length) {
@@ -4181,6 +4344,21 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       row.append(link, document.createTextNode(" — Article views: excluded (only Main Page placements)."));
       document.getElementById("pageviews-excluded-photo-list").append(row);
     }
+  }
+  if (scanMetrics.image_requests_window_end) {
+    document.getElementById("image-requests-reach").hidden = false;
+    const available = Number.isInteger(scanMetrics.image_requests_last_month)
+      || Number.isInteger(scanMetrics.image_requests_window_total);
+    document.getElementById("image-requests-totals").hidden = !available;
+    if (available) {
+      document.getElementById("image-requests-last-month").textContent = (Number.isInteger(scanMetrics.image_requests_last_month) ? scanMetrics.image_requests_last_month.toLocaleString("en-US") : "Unavailable");
+      document.getElementById("image-requests-month").textContent = scanMetrics.image_requests_window_end;
+      document.getElementById("image-requests-window-total").textContent = (Number.isInteger(scanMetrics.image_requests_window_total) ? scanMetrics.image_requests_window_total.toLocaleString("en-US") : "Unavailable");
+      document.getElementById("image-requests-window-label").textContent = `Image requests over ${scanMetrics.image_requests_window_months} months`;
+    }
+    const qualifier = !available ? "Image requests unavailable. "
+      : scanMetrics.image_requests_status === "partial" ? "Partial measurement. " : "";
+    document.getElementById("image-requests-status").textContent = `${qualifier}Photos with measurements: ${scanMetrics.image_requests_files_counted} of ${scanMetrics.image_requests_files_requested}. Complete histories: ${scanMetrics.image_requests_files_complete}. ${scanMetrics.image_requests_window_end} coverage: ${scanMetrics.image_requests_files_last_month}. No image data: ${scanMetrics.image_requests_files_no_data}. Failed: ${scanMetrics.image_requests_files_failed}. Deferred: ${scanMetrics.image_requests_files_deferred}.`;
   }
   if (hasPageviews) {
     pageviewsReach.hidden = false;
@@ -5523,6 +5701,10 @@ def report_snapshot(review, include_views=False, months=12):
         for item in snapshot["items"]:
             uses = {(a["wiki"], a["title"]): a for a in item["articles"]}
             records.append((item["title"], {"wp": uses, "all_wp": uses}))
+        print("Fetching image requests for your reach report...", file=sys.stderr)
+        snapshot["metrics"].update(image_requests_metrics(
+            records, months=months, cache_path=os.path.join(
+                os.path.dirname(os.path.abspath(review)), IMAGE_REQUESTS_CACHE_FILE)))
         print("Fetching article pageviews for your reach report...", file=sys.stderr)
         snapshot["metrics"].update(pageviews_metrics(
             records, months=months, cache_path=views_cache_path(review)))
@@ -5709,6 +5891,10 @@ def cmd_scan(args):
     reach_metrics = wikipedia_reach_metrics(metric_records)
     if getattr(args, "views", False):
         views_months = getattr(args, "views_months", 12)
+        print("  fetching image requests for %d photos..." % len(metric_photo_records), file=sys.stderr)
+        reach_metrics.update(image_requests_metrics(
+            metric_photo_records.items(), months=views_months,
+            cache_path=os.path.join(os.path.dirname(os.path.abspath(out)), IMAGE_REQUESTS_CACHE_FILE)))
         article_count = len(distinct_pageview_articles(metric_records))
         print("  fetching %d distinct articles of pageviews..." % article_count,
               file=sys.stderr)
@@ -5824,7 +6010,24 @@ def cmd_scan(args):
         print("  no missing-category photos found. You may already be caught up.",
               file=sys.stderr)
     if getattr(args, "views", False):
-        print("Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them.", file=sys.stderr)
+        image_total = reach_metrics.get("image_requests_window_total")
+        if image_total is None:
+            print("Image requests unavailable: no photos had a measurement for this period.", file=sys.stderr)
+        else:
+            print("%sImage requests: %s in %s; %s over %d months. Photos with measurements: %d of %d." % (
+                "Partial measurement — " if reach_metrics["image_requests_status"] == "partial" else "",
+                (format(reach_metrics["image_requests_last_month"], ",") if reach_metrics["image_requests_last_month"] is not None else "unavailable"), reach_metrics["image_requests_window_end"],
+                format(image_total, ","), reach_metrics["image_requests_window_months"],
+                reach_metrics["image_requests_files_counted"], reach_metrics["image_requests_files_requested"]), file=sys.stderr)
+        print("Image requests cover all referring sites and user-classified traffic. They can include preloads and do not count unique people or verified visual impressions. Missing months are omitted; partial totals include only available measurements.", file=sys.stderr)
+        print("Complete histories: %d of %d. %s coverage: %d of %d photos." % (
+            reach_metrics["image_requests_files_complete"], reach_metrics["image_requests_files_requested"],
+            reach_metrics["image_requests_window_end"], reach_metrics["image_requests_files_last_month"],
+            reach_metrics["image_requests_files_requested"]), file=sys.stderr)
+        print("Incomplete or missing image data: %d. Failed: %d. Deferred: %d." % (
+            reach_metrics["image_requests_files_no_data"], reach_metrics["image_requests_files_failed"],
+            reach_metrics["image_requests_files_deferred"]), file=sys.stderr)
+        print("Your Main Page placements stay listed but are excluded from article-view totals because a brief appearance can inflate them. Image requests include those placements.", file=sys.stderr)
         print("Main Pages excluded: %d. Main Page lookups failed: %d. Article views deferred: %d." % (
             reach_metrics.get("views_articles_excluded", 0),
             len(reach_metrics.get("views_mainpage_lookup_failed", [])),
@@ -6851,7 +7054,7 @@ def check_guided_menu_copy_matrix():
         )
         report = (
             "Create a reach report", "report",
-            "Export your photos, articles, languages, optional pageviews, and changes since the previous scan.",
+            "Export your photos, articles, languages, optional image requests and article views, and changes since the previous scan.",
         )
         gaps = (
             "Decide which photos to upload next",
@@ -8383,6 +8586,88 @@ def check_scan_reach_totals():
         os.chdir(old_cwd)
 
 
+def check_image_requests_metrics():
+    # Real scan title and the corresponding API path verified against Wikimedia.
+    title = "File:Jessie Buckley at the Toronto International Film Festival 01.jpg (Cropped & Centered).jpg"
+    other = "File:Vanessa Kirby at the 2024 Toronto International Film Festival 08 (Cropped).jpg"
+    path = "/wikipedia/commons/0/06/Jessie_Buckley_at_the_Toronto_International_Film_Festival_01.jpg_(Cropped_&_Centered).jpg"
+    check_equal("image upload path", image_requests_file_path(title), path)
+    check_equal("API documented upload path", image_requests_file_path(
+        "File:Manhattan Bridge Construction 1909.jpg"),
+        "/wikipedia/commons/1/1c/Manhattan_Bridge_Construction_1909.jpg")
+    fixed_today = datetime.date(2026, 9, 7)
+
+    class ImageClient:
+        def __init__(self, mode="ok"):
+            self.urls = []
+            self.mode = mode
+
+        def rest_get(self, url, tries=6):
+            self.urls.append(url)
+            check_equal("image requests single attempt", tries, 1)
+            check_equal("image filters", url.split("/")[8:10], ["all-referers", "user"])
+            file_path = urllib.parse.unquote(url.split("/")[10])
+            check_equal("image complete window", url.split("/")[-3:], ["monthly", "20250701" if self.mode == "sparse" else "20260801", "20260831"])
+            if self.mode in ("404", "429", "503"):
+                raise urllib.error.HTTPError(url, int(self.mode), "test response", {}, None)
+            if self.mode == "empty":
+                return {"items": []}
+            item = {"file_path": file_path, "agent": "user", "referer": "all-referers",
+                    "granularity": "monthly", "timestamp": "2026080100", "requests": 1197958}
+            if self.mode == "wrong-file":
+                item["file_path"] = "wrong"
+            if self.mode == "invalid-count":
+                item["requests"] = True
+            if self.mode == "encoded-path":
+                item["file_path"] = urllib.parse.quote(file_path, safe="/")
+            return {"items": [item, item] if self.mode == "duplicate" else [item]}
+
+    with tempfile.TemporaryDirectory(prefix="credit-check-image-requests.") as td:
+        cache = os.path.join(td, IMAGE_REQUESTS_CACHE_FILE)
+        client = ImageClient()
+        metrics = image_requests_metrics([(title, {}), (title, {})], 1, fixed_today, cache, client)
+        check_equal("images deduplicate files", len(client.urls), 1)
+        check_equal("image API exact encoded path", client.urls[0], image_requests_url(path, "20260801", "20260831"))
+        check_equal("image source count", metrics["image_requests_last_month"], 1197958)
+        check_equal("image monthly sum", metrics["image_requests_by_month"], [["2026-08", 1197958]])
+        check_equal("image photo total", metrics["image_requests_photos"][0]["window_total"], 1197958)
+        cached = image_requests_metrics([(title, {})], 1, fixed_today, cache, client)
+        check_equal("image cache no fetch", len(client.urls), 1)
+        check_equal("image cache round trip", cached, metrics)
+        encoded = image_requests_metrics([(title, {})], 1, fixed_today, client=ImageClient("encoded-path"))
+        check_equal("image encoded response path", encoded, metrics)
+        sparse = image_requests_metrics([(title, {})], 14, fixed_today, client=ImageClient("sparse"))
+        check_equal("image available last month survives missing history", sparse["image_requests_last_month"], 1197958)
+        check_equal("image missing history is partial", sparse["image_requests_status"], "partial")
+        check_equal("image missing month not zero", sparse["image_requests_by_month"][0], ["2025-07", None])
+        check_equal("image missing month coverage", sparse["image_requests_by_month_coverage"][0], ["2025-07", 0])
+        check_equal("image available month coverage", sparse["image_requests_files_last_month"], 1)
+        check_equal("image incomplete history coverage", sparse["image_requests_files_complete"], 0)
+        check_equal("image per-photo measured months", sparse["image_requests_photos"][0]["months_counted"], 1)
+        # The engine's totals are independent of the number of article placements.
+        two = image_requests_metrics([(title, {}), (other, {})], 1, fixed_today, client=ImageClient())
+        check_equal("distinct images sum independently", two["image_requests_last_month"], 2395916)
+        for mode in ("404", "empty", "wrong-file", "invalid-count", "duplicate"):
+            bad = image_requests_metrics([(title, {})], 1, fixed_today, client=ImageClient(mode))
+            check_equal("image %s unavailable" % mode, bad["image_requests_status"], "unavailable")
+            check_equal("image %s not zero" % mode, bad["image_requests_last_month"], None)
+        for code in ("429", "503"):
+            limited = ImageClient(code)
+            partial = image_requests_metrics([(title, {}), (other, {})], 1, fixed_today, cache, limited)
+            check_equal("images retain measured cache on rate limit", partial["image_requests_last_month"], 1197958)
+            check_equal("images partial coverage", partial["image_requests_status"], "partial")
+            stopped = image_requests_metrics([(title, {}), (other, {})], 1, fixed_today, client=ImageClient(code))
+            check_equal("images circuit breaker failed", stopped["image_requests_files_failed"], 1)
+            check_equal("images circuit breaker deferred", stopped["image_requests_files_deferred"], 1)
+        meta = {"author": "Jay Dixit", "by_category": "Photographs by Jay Dixit", "of_category": None, **metrics}
+        for writer, ext in ((write_markdown, ".md"), (write_org, ".org")):
+            review = os.path.join(td, "review" + ext)
+            writer({}, {}, {}, meta, review)
+            round_trip = review_scan_metrics(review)
+            check_equal("image review round trip " + ext,
+                        {k: round_trip[k] for k in IMAGE_REQUESTS_METRIC_KEYS}, metrics)
+
+
 def check_pageviews_metrics():
     class FakeViewsClient:
         def __init__(self):
@@ -8860,6 +9145,7 @@ def cmd_self_test(args):
     run_check("scan routing classification", check_scan_routing, failures)
     run_check("scan Wikipedia reach totals", check_scan_reach_totals, failures)
     run_check("Wikipedia article pageviews", check_pageviews_metrics, failures)
+    run_check("Image requests", check_image_requests_metrics, failures)
     run_check("zero-candidate scan guard", check_zero_candidate_scan_no_review, failures)
 
     if failures:
@@ -9386,7 +9672,7 @@ def interactive_report():
     review = guided_review_path()
     if not review:
         return
-    include_views = prompt_yes_no("Include Wikipedia article pageviews? This can take a few minutes.", False)
+    include_views = prompt_yes_no("Include image requests and article views? This can take a few minutes.", False)
     try:
         cmd_report(argparse.Namespace(review=review, views=include_views,
                    views_months=12, format="html", out=None, no_open=False))
@@ -9452,7 +9738,7 @@ def interactive_menu_actions(state):
             actions.append((
                 "Create a reach report",
                 "report",
-                "Export your photos, articles, languages, optional pageviews, and changes since the previous scan.",
+                "Export your photos, articles, languages, optional image requests and article views, and changes since the previous scan.",
             ))
         actions.append((
             "Settings",
@@ -9607,7 +9893,7 @@ def main():
 
     report = sub.add_parser("report", help="export a dated reach report from your complete photo gallery")
     report.add_argument("review", nargs="?", help="review file from the scan")
-    report.add_argument("--views", action="store_true", help="include article pageviews (read-only)")
+    report.add_argument("--views", action="store_true", help="include image requests and article views (read-only)")
     report.add_argument("--views-months", type=views_months_arg, default=12, metavar="N")
     report.add_argument("--format", choices=("html", "json", "csv"), default="html")
     report.add_argument("--out", help="new output file; existing files are never overwritten")
@@ -9632,9 +9918,9 @@ def main():
     s.add_argument("--english-only", action="store_true", default=None)
     s.add_argument("--min-uses", type=int, default=None)
     s.add_argument("--views", action="store_true",
-                   help="fetch article pageviews for the photos found by this scan")
+                   help="fetch image requests and article views for the photos found by this scan")
     s.add_argument("--views-months", type=views_months_arg, default=12, metavar="N",
-                   help="complete months of pageviews to fetch with --views (1-24; default: 12)")
+                   help="complete months of image requests and article views with --views (1-24; default: 12)")
     s.add_argument("--review-format", choices=["markdown", "md", "org"],
                    help="review format override (default markdown; %s can set org)" %
                    PREFERENCE_FILE)

@@ -30,6 +30,12 @@ _METRIC_KEYS = (
     "views_articles_requested", "views_articles_no_data", "views_articles_failed",
     "views_articles_deferred", "views_mainpage_policy", "views_articles_excluded",
     "views_mainpage_lookup_failed", "views_excluded_photos",
+    "image_requests_status", "image_requests_window_end", "image_requests_window_months",
+    "image_requests_last_month", "image_requests_window_total", "image_requests_by_month",
+    "image_requests_files_requested", "image_requests_files_counted", "image_requests_files_no_data",
+    "image_requests_files_complete", "image_requests_files_last_month", "image_requests_files_failed",
+    "image_requests_files_deferred", "image_requests_referer", "image_requests_agent",
+    "image_requests_by_month_coverage", "image_requests_photos",
 )
 
 
@@ -372,6 +378,41 @@ def render_reach_report(snapshot, comparison=None, title=None):
         (_number(metrics["article_total"]), "distinct Wikipedia articles"),
         (_number(metrics["wikipedia_total"]), "Wikipedia language editions"),
     ))
+    image_requests = ""
+    if "image_requests_status" in metrics:
+        status = metrics.get("image_requests_status")
+        counted = metrics.get("image_requests_files_counted", 0)
+        requested = metrics.get("image_requests_files_requested", counted)
+        complete = metrics.get("image_requests_files_complete", counted)
+        last_month_counted = metrics.get("image_requests_files_last_month", counted)
+        no_data = metrics.get("image_requests_files_no_data", 0)
+        failed = metrics.get("image_requests_files_failed", 0)
+        deferred = metrics.get("image_requests_files_deferred", 0)
+        explanation = ('<p class="note">These are actual requests for your image files across all referring sites. '
+                       'They count user-classified traffic, which excludes identified automated traffic, but may include preloads. '
+                       'They are not unique people or verified visual impressions.</p>')
+        availability = ('<p class="note">Photos measured: %s of %s. Complete histories: %s of %s. %s coverage: %s of %s. No data: %s. Failed requests: %s. Deferred files: %s. Missing months are omitted; displayed totals sum the measurements that are available.</p>' %
+                        tuple(map(_e, (_number(counted), _number(requested), _number(complete), _number(requested),
+                                       metrics.get("image_requests_window_end", "Last month"), _number(last_month_counted),
+                                       _number(requested), _number(no_data), _number(failed), _number(deferred)))))
+        if status == "unavailable":
+            image_requests = ('<section><h2>Image requests unavailable</h2>'
+                              '<p>Image-file requests could not be measured for this report. No request total is presented.</p>'
+                              + explanation + availability + '</section>')
+        else:
+            qualifier = "Partial measurement · " if status == "partial" else ""
+            request_cards = []
+            if metrics.get("image_requests_last_month") is not None:
+                request_cards.append('<div><strong>%s</strong><span>image requests in %s</span></div>' % (
+                    _e(_number(metrics.get("image_requests_last_month"))),
+                    _e(metrics.get("image_requests_window_end", "measurement month unavailable"))))
+            if metrics.get("image_requests_window_total") is not None:
+                request_cards.append('<div><strong>%s</strong><span>image requests across available measurements in the %s-month window</span></div>' % (
+                    _e(_number(metrics.get("image_requests_window_total"))),
+                    _e(metrics.get("image_requests_window_months", "—"))))
+            totals = '<div class="viewgrid">%s</div>' % "".join(request_cards) if request_cards else '<p>No request total is available.</p>'
+            image_requests = ('<section><h2>%sImage requests</h2>%s%s%s</section>' %
+                              (_e(qualifier), totals, explanation, availability))
     views = ""
     if "views_last_month" in metrics:
         mainpage_policy = metrics.get("views_mainpage_policy")
@@ -397,19 +438,19 @@ def render_reach_report(snapshot, comparison=None, title=None):
                                         _number(no_data), _number(failed), _number(deferred)))) +
                          (lookup_note,)))
         if mainpage_policy != "exclude-v1":
-            views = ('<section><h2>Article views need updating</h2>'
+            views = ('<section class="article-context"><h2>Article views need updating</h2>'
                      '<p>This report predates Main Page exclusion. Regenerate it with article views to calculate comparable totals.</p></section>')
         elif status == "excluded":
-            views = ('<section><h2>Article views excluded</h2>'
+            views = ('<section class="article-context"><h2>Article views excluded</h2>'
                      '<p>All placements eligible for article-view measurement were Main Page placements. They remain listed below, but no article-view total is presented.</p>'
                      + explanation + availability + '</section>')
         elif status == "unavailable" or metrics.get("views_last_month") is None:
-            views = ('<section><h2>Article views unavailable</h2>'
+            views = ('<section class="article-context"><h2>Article views unavailable</h2>'
                      '<p>Wikipedia article pageviews could not be measured for this report. No pageview total is presented.</p>'
                      + explanation + availability + '</section>')
         else:
             qualifier = "Partial measurement · " if status == "partial" else ""
-            views = ('<section><h2>%sArticle views</h2><div class="viewgrid"><div><strong>%s</strong><span>article views in %s</span></div>'
+            views = ('<section class="article-context"><h2>%sArticle views</h2><div class="viewgrid"><div><strong>%s</strong><span>article views in %s</span></div>'
                      '<div><strong>%s</strong><span>article views across %s months</span></div></div>%s%s</section>') % (
                          _e(qualifier), _e(_number(metrics.get("views_last_month"))),
                          _e(metrics.get("views_window_end", "measurement month unavailable")),
@@ -453,6 +494,10 @@ def render_reach_report(snapshot, comparison=None, title=None):
                            len(comparison.get("removed_photos", [])), len(comparison.get("added_placements", [])),
                            len(comparison.get("removed_placements", []))))) + (change_details,))
     photo_sections = []
+    request_photos = {}
+    for photo in metrics.get("image_requests_photos", []):
+        if isinstance(photo, dict) and isinstance(photo.get("title"), str):
+            request_photos[photo["title"]] = photo
     excluded_photos = {}
     if metrics.get("views_mainpage_policy") == "exclude-v1":
         for photo in metrics.get("views_excluded_photos", []):
@@ -467,16 +512,39 @@ def render_reach_report(snapshot, comparison=None, title=None):
         photo_views = ""
         if item["title"] in excluded_photos:
             photo_views = '<p class="note">Article views: excluded — only Main Page placements.</p>'
+        photo_requests = ""
+        request = request_photos.get(item["title"])
+        if request:
+            request_status = request.get("status")
+            if request_status in ("complete", "partial"):
+                parts = []
+                if request.get("last_month") is not None:
+                    parts.append('<b>%s image requests</b> in %s' % (
+                        _e(_number(request.get("last_month"))), _e(metrics.get("image_requests_window_end", "—"))))
+                if request.get("window_total") is not None:
+                    parts.append('<b>%s image requests</b> across available measurements' %
+                                 _e(_number(request.get("window_total"))))
+                measured = request.get("months_counted")
+                window = metrics.get("image_requests_window_months")
+                if measured is not None and window is not None:
+                    parts.append('%s of %s months measured' % (_e(_number(measured)), _e(_number(window))))
+                photo_requests = '<p class="photo-requests">%s</p>' % " · ".join(parts)
+            elif request_status == "no-data":
+                photo_requests = '<p class="note">Image requests: no data returned.</p>'
+            elif request_status == "failed":
+                photo_requests = '<p class="note">Image requests: request failed.</p>'
+            elif request_status == "deferred":
+                photo_requests = '<p class="note">Image requests: deferred.</p>'
         photo_sections.append('<article><h3>%s</h3>%s<p>%s · %s placements</p>%s<ul>%s</ul></article>' % (
             _safe_link(commons, item["label"]), caption, _e(attribution),
-            _number(len(item["articles"])), photo_views, article_links))
+            _number(len(item["articles"])), photo_requests + photo_views, article_links))
     scan_date = _display_timestamp(snapshot["scanned_at"])
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s</title><style>
-:root{--paper:#f7f7f3;--white:#fff;--ink:#15171c;--muted:#5b6068;--line:#e5e5df;--green:#0b5738}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}main{max-width:1080px;margin:auto;padding:56px 32px 80px}header{border-top:5px solid var(--green);padding-top:24px}h1{margin:.15em 0;font:400 clamp(38px,7vw,72px)/1.02 Georgia,serif;letter-spacing:-.03em}.eyebrow,h2{color:var(--green);font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.byline,.note,.caption,small{color:var(--muted)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);margin:40px 0;background:var(--white);border:1px solid var(--line)}.metric{padding:28px;border-top:2px solid var(--ink)}.metric+.metric{border-left:1px solid var(--line)}.metric strong,.viewgrid strong{display:block;color:var(--green);font:400 56px/1 Georgia,serif}.metric span,.viewgrid span{display:block;margin-top:10px;font-weight:700}section{margin:44px 0}.viewgrid,.changes{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.viewgrid>div,.changes span{padding:20px;background:var(--white);border:1px solid var(--line)}.change-details{margin-top:18px}.change-details details{margin:8px 0;padding:12px 16px;background:var(--white);border:1px solid var(--line)}.change-details summary{cursor:pointer;font-weight:700}.change-details summary b{color:var(--green);float:right}article{break-inside:avoid;margin:0 0 18px;padding:22px;background:var(--white);border:1px solid var(--line)}article h3{margin:0;font:400 24px/1.25 Georgia,serif}a{color:var(--green);text-decoration-thickness:1px;text-underline-offset:3px}ul{columns:2;column-gap:32px;padding-left:22px}li{break-inside:avoid;margin:.35em 0}small{display:block}@media(max-width:700px){main{padding:32px 18px}.metrics,.viewgrid,.changes{grid-template-columns:1fr}.metric+.metric{border-left:0}.metric strong{font-size:46px}ul{columns:1}}@media print{body{background:#fff}main{max-width:none;padding:0}.metrics,article,.viewgrid>div,.changes span,.change-details details{background:#fff}details{display:block}details>summary{list-style:none}details>summary::marker{display:none}details:not([open])>*:not(summary){display:block}a{color:inherit;text-decoration:none}header{padding-top:14px}section{margin:28px 0}}
-</style></head><body><main><header><div class="eyebrow">Credit Check · dated evidence</div><h1>%s</h1><p class="byline">Photographer: %s<br>%s</p></header><div class="metrics">%s</div>%s%s<section><h2>Photo and article evidence</h2>%s</section><footer class="note">Snapshot %s</footer></main></body></html>""" % (
+:root{--paper:#f7f7f3;--white:#fff;--ink:#15171c;--muted:#5b6068;--line:#e5e5df;--green:#0b5738}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}main{max-width:1080px;margin:auto;padding:56px 32px 80px}header{border-top:5px solid var(--green);padding-top:24px}h1{margin:.15em 0;font:400 clamp(38px,7vw,72px)/1.02 Georgia,serif;letter-spacing:-.03em}.eyebrow,h2{color:var(--green);font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.byline,.note,.caption,small{color:var(--muted)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);margin:40px 0;background:var(--white);border:1px solid var(--line)}.metric{padding:28px;border-top:2px solid var(--ink)}.metric+.metric{border-left:1px solid var(--line)}.metric strong,.viewgrid strong{display:block;color:var(--green);font:400 56px/1 Georgia,serif}.metric span,.viewgrid span{display:block;margin-top:10px;font-weight:700}section{margin:44px 0}.article-context{margin-top:32px;padding-top:28px;border-top:1px solid var(--line)}.article-context .viewgrid strong{font-size:42px}.viewgrid,.changes{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.viewgrid>div,.changes span{padding:20px;background:var(--white);border:1px solid var(--line)}.change-details{margin-top:18px}.change-details details{margin:8px 0;padding:12px 16px;background:var(--white);border:1px solid var(--line)}.change-details summary{cursor:pointer;font-weight:700}.change-details summary b{color:var(--green);float:right}article{break-inside:avoid;margin:0 0 18px;padding:22px;background:var(--white);border:1px solid var(--line)}article h3{margin:0;font:400 24px/1.25 Georgia,serif}a{color:var(--green);text-decoration-thickness:1px;text-underline-offset:3px}ul{columns:2;column-gap:32px;padding-left:22px}li{break-inside:avoid;margin:.35em 0}small{display:block}@media(max-width:700px){main{padding:32px 18px}.metrics,.viewgrid,.changes{grid-template-columns:1fr}.metric+.metric{border-left:0}.metric strong{font-size:46px}ul{columns:1}}@media print{body{background:#fff}main{max-width:none;padding:0}.metrics,article,.viewgrid>div,.changes span,.change-details details{background:#fff}details{display:block}details>summary{list-style:none}details>summary::marker{display:none}details:not([open])>*:not(summary){display:block}a{color:inherit;text-decoration:none}header{padding-top:14px}section{margin:28px 0}}
+</style></head><body><main><header><div class="eyebrow">Credit Check · dated evidence</div><h1>%s</h1><p class="byline">Photographer: %s<br>%s</p></header><div class="metrics">%s</div>%s%s%s<section><h2>Photo and article evidence</h2>%s</section><footer class="note">Snapshot %s</footer></main></body></html>""" % (
         _e(report_title), _e(report_title), _e(attribution),
         "Scan completed: " + _e(scan_date) if snapshot["scanned_at"] else _e(scan_date),
-        cards, views, changes, "".join(photo_sections), _e(snapshot["snapshot_id"]),
+        cards, image_requests, views, changes, "".join(photo_sections), _e(snapshot["snapshot_id"]),
     )
 
 
@@ -500,9 +568,36 @@ def export_placements_csv(output_path, snapshot):
     """Write one CSV row per photo-to-Wikipedia-page placement."""
     snapshot = _validate_snapshot(snapshot)
     stream = io.StringIO(newline="")
-    writer = csv.DictWriter(stream, fieldnames=("photo_title", "article_wiki", "article_title", "article_url"))
+    fieldnames = ("photo_title", "article_wiki", "article_title", "article_url")
+    has_image_requests = "image_requests_status" in snapshot["metrics"]
+    if has_image_requests:
+        fieldnames += ("image_requests_status", "image_requests_last_month", "image_requests_window_total",
+                       "image_requests_months_counted", "image_requests_window_start", "image_requests_window_end",
+                       "image_requests_window_months", "image_requests_referer", "image_requests_agent")
+    writer = csv.DictWriter(stream, fieldnames=fieldnames)
     writer.writeheader()
-    writer.writerows(_placement_records(snapshot).values())
+    requests = {photo.get("title"): photo for photo in snapshot["metrics"].get("image_requests_photos", [])
+                if isinstance(photo, dict) and isinstance(photo.get("title"), str)}
+    months = snapshot["metrics"].get("image_requests_by_month", [])
+    window_start = months[0][0] if months and isinstance(months[0], list) and months[0] else ""
+    rows = []
+    for placement in _placement_records(snapshot).values():
+        request = requests.get(placement["photo_title"], {})
+        row = dict(placement)
+        if has_image_requests:
+            row.update({
+                "image_requests_status": request.get("status", ""),
+                "image_requests_last_month": request.get("last_month") if request.get("last_month") is not None else "",
+                "image_requests_window_total": request.get("window_total") if request.get("window_total") is not None else "",
+                "image_requests_months_counted": request.get("months_counted", ""),
+                "image_requests_window_start": window_start,
+                "image_requests_window_end": snapshot["metrics"].get("image_requests_window_end", ""),
+                "image_requests_window_months": snapshot["metrics"].get("image_requests_window_months", ""),
+                "image_requests_referer": snapshot["metrics"].get("image_requests_referer", ""),
+                "image_requests_agent": snapshot["metrics"].get("image_requests_agent", ""),
+            })
+        rows.append(row)
+    writer.writerows(rows)
     return _exclusive_text(output_path, stream.getvalue())
 
 
@@ -516,6 +611,30 @@ def check_reports(cache_path):
     pages = {(a["wiki"], a["title"]) for item in items for a in item.get("articles", [])}
     wikis = {a["wiki"] for item in items for a in item.get("articles", [])}
     metrics = {"in_use_total": len(items), "article_total": len(pages), "wikipedia_total": len(wikis)}
+    first_title = items[0]["title"]
+    second_title = items[1]["title"]
+    metrics.update({
+        "image_requests_status": "partial", "image_requests_window_end": "1999-12",
+        "image_requests_window_months": 2, "image_requests_last_month": 123,
+        "image_requests_window_total": 789, "image_requests_by_month": [["1999-11", 666], ["1999-12", 123]],
+        "image_requests_by_month_coverage": [["1999-11", 2], ["1999-12", 1]],
+        "image_requests_files_requested": len(items), "image_requests_files_counted": 2,
+        "image_requests_files_complete": 1, "image_requests_files_last_month": 1,
+        "image_requests_files_no_data": max(len(items) - 2, 0), "image_requests_files_failed": 0,
+        "image_requests_files_deferred": 0, "image_requests_referer": "all-referers",
+        "image_requests_agent": "user", "image_requests_photos": [
+            {"title": first_title, "commons_url": "https://commons.wikimedia.org/wiki/" + quote(first_title),
+             "status": "complete", "last_month": 123, "window_total": 456, "months_counted": 2},
+            {"title": second_title, "commons_url": "https://commons.wikimedia.org/wiki/" + quote(second_title),
+             "status": "partial", "last_month": None, "window_total": 333, "months_counted": 1},
+        ],
+        "views_status": "complete", "views_last_month": 12, "views_window_end": "1999-12",
+        "views_window_months": 2, "views_window_total": 34, "views_by_month": [["1999-11", 22], ["1999-12", 12]],
+        "views_top_photos": [], "views_articles_counted": len(pages), "views_articles_requested": len(pages),
+        "views_articles_no_data": 0, "views_articles_failed": 0, "views_articles_deferred": 0,
+        "views_mainpage_policy": "exclude-v1", "views_articles_excluded": 0,
+        "views_mainpage_lookup_failed": [], "views_excluded_photos": [],
+    })
     snapshot = make_snapshot({"credited_name": "Verification"}, {"source": "real-cache"}, items, metrics,
                              "2000-01-01T00:00:00Z")
     comparison = compare_snapshots(snapshot, snapshot)
@@ -523,15 +642,32 @@ def check_reports(cache_path):
     with tempfile.TemporaryDirectory(prefix="credit-check-reports-") as directory:
         json_path = export_snapshot_json(Path(directory) / "report.json", snapshot, comparison)
         csv_path = export_placements_csv(Path(directory) / "placements.csv", snapshot)
+        legacy_snapshot = make_snapshot({"credited_name": "Verification"}, {"source": "legacy"}, items,
+                                        {"in_use_total": len(items), "article_total": len(pages),
+                                         "wikipedia_total": len(wikis)}, "2000-01-01T00:00:00Z")
+        legacy_csv_path = export_placements_csv(Path(directory) / "legacy-placements.csv", legacy_snapshot)
         exported = json.loads(json_path.read_text(encoding="utf-8"))["snapshot"]
         csv_rows = list(csv.DictReader(csv_path.open(encoding="utf-8", newline="")))
+        legacy_reader = csv.DictReader(legacy_csv_path.open(encoding="utf-8", newline=""))
+        legacy_fields = legacy_reader.fieldnames
     checks = {
         "photos": len(snapshot["items"]), "placements": snapshot["metrics"]["placement_total"],
         "distinct_articles": snapshot["metrics"]["article_total"], "wikipedias": snapshot["metrics"]["wikipedia_total"],
         "json_round_trip": exported == snapshot, "csv_rows": len(csv_rows),
         "html_contains_all_photo_titles": all(_e(item["label"]) in html_text for item in snapshot["items"]),
         "html_has_no_script": "<script" not in html_text.casefold(),
+        "html_has_image_requests_before_article_views": html_text.find("Image requests") < html_text.find("Article views"),
+        "html_has_per_photo_image_requests": "123 image requests" in html_text and "1 of 2 months measured" in html_text,
+        "html_has_coverage": "Photos measured: 2 of %s" % len(items) in html_text and "1999-12 coverage: 1 of %s" % len(items) in html_text,
+        "csv_has_image_requests": any(row["image_requests_last_month"] == "123" and row["image_requests_months_counted"] == "2"
+                                      and row["image_requests_window_start"] == "1999-11" and row["image_requests_referer"] == "all-referers"
+                                      for row in csv_rows),
+        "csv_preserves_legacy_fields": legacy_fields == ["photo_title", "article_wiki", "article_title", "article_url"],
     }
-    if checks["csv_rows"] != checks["placements"] or not checks["json_round_trip"] or not checks["html_contains_all_photo_titles"] or not checks["html_has_no_script"]:
+    if (checks["csv_rows"] != checks["placements"] or not checks["json_round_trip"]
+            or not checks["html_contains_all_photo_titles"] or not checks["html_has_no_script"]
+            or not checks["html_has_image_requests_before_article_views"]
+            or not checks["html_has_per_photo_image_requests"] or not checks["html_has_coverage"]
+            or not checks["csv_has_image_requests"] or not checks["csv_preserves_legacy_fields"]):
         raise AssertionError("report verification failed: %r" % checks)
     return checks

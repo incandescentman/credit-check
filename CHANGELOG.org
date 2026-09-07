@@ -1,6 +1,20 @@
 #+TITLE: Credit Check Changelog
 #+STARTUP: content
 
+* v1.3.0 — September 7, 2026
+
+** Added
+
+- Added image requests to ~scan --views~ and ~report --views~: how many times each of your image files was requested, from Wikimedia's per-file mediarequests API, with monthly totals and a figure for each photo. Image requests count the files themselves, so they include Main Page appearances and do not depend on which article a photo sits in.
+- Added image requests to the reach report, the browser picker, and the JSON and CSV exports. The CSV gains the date window, traffic filters, each photo's measurement status and month coverage, and its request totals. A photo used in several articles repeats those values on each row, so do not add them together. CSVs created without ~--views~ keep their original columns.
+- Cached image requests in ~.credit-check-image-requests.json~ beside the article-view cache. Repeated runs reuse it, and a rate limit stops further fetching without discarding measurements already collected.
+
+** Changed
+
+- Made image requests the primary reach figure. Article views stay as separate context, since they describe the readership of the articles carrying your photos rather than requests for the photos themselves.
+- Reported measurement coverage explicitly: how many photos have any measurements, how many have complete histories, and how many were measured in the final month. A photo with an incomplete history still contributes its available months; missing months are omitted rather than counted as zero.
+- Stated the limits of image requests wherever they appear. They use Wikimedia's user-classified traffic across all referring sites, so identified automated traffic is excluded, but preloads may count, and they are not unique people or verified visual impressions.
+
 * v1.2.1 — September 7, 2026
 
 ** Changed

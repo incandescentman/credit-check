@@ -10,6 +10,7 @@ review.org
 
 # Cached article pageviews for opt-in reach metrics
 .credit-check-views.json
+.credit-check-image-requests.json
 
 # Immutable local scan history and personal reach exports
 .credit-check-history/
