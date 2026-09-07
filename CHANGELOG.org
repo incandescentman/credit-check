@@ -1,6 +1,17 @@
 #+TITLE: Credit Check Changelog
 #+STARTUP: content
 
+* v1.2.1 — September 7, 2026
+
+** Changed
+
+- Labeled pageview figures as article views. They count views of the Wikipedia articles carrying your photos at scan time, so a photo added last week inherits that article's earlier views. Reports, the browser picker, and scan output now say so, and explain that per-photo totals overlap when photos share an article.
+- Showed the pageview month in the browser picker, including on phones, and kept large totals from being clipped.
+
+** Fixed
+
+- Excluded Main Page placements from article-view totals, since one day on a Main Page can add millions of views. The placements stay listed, and a photo used only on a Main Page shows as excluded rather than zero. Article views saved by earlier versions stay hidden until you create a new reach report with article views.
+
 * v1.2.0 — September 6, 2026
 
 ** Added

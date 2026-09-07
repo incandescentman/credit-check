@@ -74,7 +74,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -683,6 +683,7 @@ def wikipedia_reach_metrics(records):
 PAGEVIEWS_API = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article"
 VIEWS_CACHE_FILE = ".credit-check-views.json"
 VIEWS_CACHE_VERSION = 1
+MAINPAGE_CACHE_MAX_AGE = 7 * 24 * 60 * 60
 VIEWS_METRIC_KEYS = (
     "views_status",
     "views_window_end",
@@ -696,6 +697,10 @@ VIEWS_METRIC_KEYS = (
     "views_articles_failed",
     "views_articles_deferred",
     "views_top_photos",
+    "views_mainpage_policy",
+    "views_articles_excluded",
+    "views_mainpage_lookup_failed",
+    "views_excluded_photos",
 )
 
 
@@ -757,6 +762,43 @@ def distinct_pageview_articles(records):
     return articles
 
 
+def mainpage_titles(project, client):
+    """Ask this Wikipedia for its configured and canonical Main Page titles."""
+    if not re.fullmatch(r"[a-z0-9-]+\.wikipedia", project):
+        raise ValueError("Not a Wikipedia project: %s" % project)
+    api = "https://%s.org/w/api.php?" % project
+    info = client.rest_get(api + urllib.parse.urlencode({
+        "action": "query", "meta": "siteinfo", "siprop": "general", "format": "json",
+    }), tries=1)
+    title = info.get("query", {}).get("general", {}).get("mainpage")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("Siteinfo did not provide a Main Page title")
+    resolved = client.rest_get(api + urllib.parse.urlencode({
+        "action": "query", "titles": title, "redirects": "1", "format": "json",
+        "formatversion": "2",
+    }), tries=1)
+    pages = resolved.get("query", {}).get("pages", [])
+    if len(pages) != 1 or pages[0].get("missing") is not None or not pages[0].get("title"):
+        raise ValueError("Could not resolve the Main Page title")
+    return sorted({pageviews_article({"title": t}) for t in (title, pages[0]["title"])})
+
+
+def cached_mainpage_titles(entry, now):
+    """Reuse positive lookups for a week, then check for wiki configuration changes."""
+    if not isinstance(entry, dict):
+        return None
+    checked_at = entry.get("checked_at")
+    titles = entry.get("titles")
+    if (isinstance(checked_at, bool) or not isinstance(checked_at, (int, float))
+            or not 0 <= now - checked_at < MAINPAGE_CACHE_MAX_AGE):
+        return None
+    if not (isinstance(titles, list) and titles
+            and all(isinstance(t, str) and t.strip()
+                    and t == pageviews_article({"title": t}) for t in titles)):
+        return None
+    return titles
+
+
 def load_views_cache(path):
     try:
         with open(path, encoding="utf-8") as cache_file:
@@ -788,11 +830,36 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
         "articles": {},
     }
     cached_articles = payload["articles"]
+    cached_mainpages = payload.setdefault("mainpages", {})
+    if not isinstance(cached_mainpages, dict):
+        cached_mainpages = payload["mainpages"] = {}
+    rest_client = client or Client()
+    excluded = set()
+    lookup_failed = set()
+    dirty = False
+    for project in sorted({key[0] for key in article_uses}):
+        titles = cached_mainpage_titles(cached_mainpages.get(project), time.time())
+        if titles is None:
+            try:
+                titles = mainpage_titles(project, rest_client)
+            except Exception as error:
+                lookup_failed.add(project)
+                print("  Main Page lookup failed: %s; article views deferred (%s)" %
+                      (project, error), file=sys.stderr)
+                continue
+            cached_mainpages[project] = {"titles": titles, "checked_at": time.time()}
+            dirty = True
+        excluded.update(key for key in article_uses
+                        if key[0] == project and key[1] in titles)
+    eligible_articles = {key: use for key, use in article_uses.items() if key not in excluded}
+    deferred = {key for key in eligible_articles if key[0] in lookup_failed}
     series_by_article = {}
     no_data = set()
     failed = set()
     pending = []
-    for key in sorted(article_uses):
+    for key in sorted(eligible_articles):
+        if key in deferred:
+            continue
         cache_key = "%s|%s" % key
         cached = cached_articles.get(cache_key)
         if (isinstance(cached, dict)
@@ -804,7 +871,6 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
         else:
             pending.append(key)
 
-    rest_client = client or Client()
     stop_fetching = threading.Event()
 
     def fetch_one(key):
@@ -841,8 +907,6 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
             return key, "failed", None, error
         return key, "ok", series, None
 
-    dirty = False
-    deferred = set()
     if pending:
         max_workers = max(1, min(4, int(workers or 1), len(pending)))
         if max_workers == 1:
@@ -876,15 +940,27 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
         for month in month_labels
     }
     measured_count = len(series_by_article)
-    if not measured_count:
+    if excluded and not eligible_articles:
+        views_status = "excluded"
+    elif not measured_count:
         views_status = "unavailable"
-    elif measured_count == len(article_uses):
+    elif measured_count == len(eligible_articles):
         views_status = "complete"
     elif measured_count:
         views_status = "partial"
     top_photos = []
+    excluded_photos = []
     for title, rec in photo_records:
-        article_keys = set(distinct_pageview_articles([rec]))
+        all_article_keys = set(distinct_pageview_articles([rec]))
+        article_keys = all_article_keys - excluded
+        photo_excluded = len(all_article_keys & excluded)
+        if all_article_keys and not article_keys:
+            excluded_photos.append({
+                "title": title, "commons_url": commons_file_url(title),
+                "views_status": "excluded", "views_last_month": None,
+                "views_window_total": None, "article_count": 0,
+                "articles_total": 0, "articles_excluded": photo_excluded,
+            })
         measured_keys = article_keys & set(series_by_article)
         if not measured_keys:
             continue
@@ -901,6 +977,7 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
             "views_window_total": window_total,
             "article_count": len(measured_keys),
             "articles_total": len(article_keys),
+            "articles_excluded": photo_excluded,
         })
     top_photos.sort(key=lambda photo: (
         -photo["views_last_month"],
@@ -918,11 +995,15 @@ def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
         "views_by_month": ([[month, totals_by_month[month]] for month in month_labels]
                            if measured_count else []),
         "views_articles_counted": measured_count,
-        "views_articles_requested": len(article_uses),
+        "views_articles_requested": len(eligible_articles),
         "views_articles_no_data": len(no_data),
         "views_articles_failed": len(failed),
         "views_articles_deferred": len(deferred),
         "views_top_photos": top_photos[:10],
+        "views_mainpage_policy": "exclude-v1",
+        "views_articles_excluded": len(excluded),
+        "views_mainpage_lookup_failed": sorted(lookup_failed),
+        "views_excluded_photos": excluded_photos,
     }
 
 
@@ -3715,7 +3796,10 @@ button.primary:focus-visible {
   .section-heading { margin-bottom: 10px; }
   .section-heading h2 { font-size: 19px; }
   .section-heading-meta { display: none; }
-  .pageviews-summary { grid-template-columns: 1fr 1fr; }
+  .pageviews-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pageviews-summary .reach-row { min-width: 0; padding: 10px 7px; }
+  .pageviews-summary .reach-row strong { font-size: clamp(20px, 6vw, 28px); }
+  .pageviews-summary .reach-sub { display: block; font-size: 11px; }
   .pageviews-details { display: none; }
 }
 </style>
@@ -3773,6 +3857,11 @@ button.primary:focus-visible {
                     <a id="reach-report-link" href="/report" target="_blank" rel="noopener">Open reach report ↗</a>
                   </div>
                   <p class="scan-changes" id="pageviews-status" hidden></p>
+                  <p class="scan-changes" id="pageviews-mainpage-note" hidden></p>
+                  <details class="scan-changes" id="pageviews-excluded-photos" hidden>
+                    <summary>Photos with article views excluded</summary>
+                    <ul id="pageviews-excluded-photo-list"></ul>
+                  </details>
                   <details class="scan-changes" id="scan-changes" hidden>
                     <summary>Changes since your previous scan</summary>
                     <p id="scan-changes-summary"></p>
@@ -3782,20 +3871,22 @@ button.primary:focus-visible {
                     <div class="pageviews-summary">
                       <div class="reach-row">
                         <strong id="views-last-month">—</strong>
-                        <span class="reach-label">Article views last month<span class="reach-sub" id="views-last-month-label">last complete month</span></span>
+                        <span class="reach-label">Article views<span class="reach-sub" id="views-last-month-label">last complete month</span></span>
                       </div>
                       <div class="reach-row">
                         <strong id="views-window-total">—</strong>
                         <span class="reach-label" id="views-window-label">Article views in this window<span class="reach-sub">across distinct Wikipedia article pages</span></span>
                       </div>
                     </div>
+                    <p class="scan-changes">These totals show views of Wikipedia articles that carried your photos when this scan ran. Your photos may not have been on those pages for the whole period. Article views do not measure how often someone saw your photos. Each article counts once in the overall total.</p>
                     <div class="pageviews-details">
                       <section class="pageviews-list-block" aria-labelledby="views-by-month-title">
                         <h3 id="views-by-month-title">By month</h3>
                         <ul class="pageviews-list" id="views-by-month"></ul>
                       </section>
                       <section class="pageviews-list-block" aria-labelledby="views-top-photos-title">
-                        <h3 id="views-top-photos-title">Article reach by photo last month</h3>
+                        <h3 id="views-top-photos-title">Article views by photo</h3>
+                        <p class="scan-changes">Photos can share articles, so their individual totals overlap.</p>
                         <ol class="pageviews-list pageviews-photo-list" id="views-top-photos"></ol>
                       </section>
                     </div>
@@ -4048,24 +4139,55 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   } else {
     scanMetricsNote.textContent = "Scan again to calculate your complete Wikipedia reach.";
   }
-  const hasPageviews = Number.isInteger(scanMetrics.views_last_month)
+  const verifiedMainpages = scanMetrics.views_mainpage_policy === "exclude-v1";
+  const hasPageviews = verifiedMainpages && Number.isInteger(scanMetrics.views_last_month)
     && Number.isInteger(scanMetrics.views_window_total)
     && typeof scanMetrics.views_window_end === "string"
     && Number.isInteger(scanMetrics.views_window_months)
     && Array.isArray(scanMetrics.views_by_month)
     && Array.isArray(scanMetrics.views_top_photos);
   const pageviewsStatus = document.getElementById("pageviews-status");
-  if (scanMetrics.views_status === "unavailable") {
+  if (typeof scanMetrics.views_window_end === "string" && !verifiedMainpages) {
     pageviewsStatus.hidden = false;
-    pageviewsStatus.textContent = "Article pageviews are unavailable. The pageview service did not provide usable data for this report.";
+    pageviewsStatus.textContent = "These saved article views need recalculation to exclude Main Pages. Create a new reach report with article views.";
+  } else if (scanMetrics.views_status === "excluded") {
+    pageviewsStatus.hidden = false;
+    pageviewsStatus.textContent = "Article views excluded: your photos have only Main Page placements.";
+  } else if (scanMetrics.views_status === "unavailable") {
+    pageviewsStatus.hidden = false;
+    pageviewsStatus.textContent = "Article pageviews are unavailable. No eligible articles could be measured for this report.";
   } else if (scanMetrics.views_status === "partial") {
     pageviewsStatus.hidden = false;
     pageviewsStatus.textContent = `Partial article pageviews: ${scanMetrics.views_articles_counted} of ${scanMetrics.views_articles_requested} articles measured. ${scanMetrics.views_articles_failed} failed; ${scanMetrics.views_articles_deferred} deferred.`;
+  }
+  if (verifiedMainpages) {
+    const note = document.getElementById("pageviews-mainpage-note");
+    note.hidden = false;
+    note.textContent = "Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them.";
+    note.textContent += ` Main Pages excluded: ${scanMetrics.views_articles_excluded || 0}.`;
+    const lookupFailures = scanMetrics.views_mainpage_lookup_failed || [];
+    if (lookupFailures.length) {
+      note.textContent += ` Main Page lookup failed for ${lookupFailures.join(", ")}; article views from those Wikipedias are deferred.`;
+    }
+    const excludedPhotos = scanMetrics.views_excluded_photos || [];
+    document.getElementById("pageviews-excluded-photos").hidden = !excludedPhotos.length;
+    for (const photo of excludedPhotos) {
+      const row = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = photo.commons_url;
+      link.textContent = String(photo.title).replace(/^File:/, "");
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      row.append(link, document.createTextNode(" — Article views: excluded (only Main Page placements)."));
+      document.getElementById("pageviews-excluded-photo-list").append(row);
+    }
   }
   if (hasPageviews) {
     pageviewsReach.hidden = false;
     viewsLastMonth.textContent = scanMetrics.views_last_month.toLocaleString("en-US");
     viewsLastMonthLabel.textContent = scanMetrics.views_window_end;
+    document.getElementById("views-top-photos-title").textContent = `Article views by photo in ${scanMetrics.views_window_end}`;
+    viewsWindowLabel.querySelector(".reach-sub").textContent = `through ${scanMetrics.views_window_end}`;
     viewsWindowTotal.textContent = scanMetrics.views_window_total.toLocaleString("en-US");
     viewsWindowLabel.firstChild.textContent = `Article views over ${scanMetrics.views_window_months} months`;
     scanMetrics.views_by_month.forEach(([month, views]) => {
@@ -5404,6 +5526,11 @@ def report_snapshot(review, include_views=False, months=12):
         print("Fetching article pageviews for your reach report...", file=sys.stderr)
         snapshot["metrics"].update(pageviews_metrics(
             records, months=months, cache_path=views_cache_path(review)))
+    elif ("views_window_end" in snapshot["metrics"]
+          and snapshot["metrics"].get("views_mainpage_policy") != "exclude-v1"):
+        snapshot["metrics"].update({"views_status": "unavailable", "views_last_month": None,
+                                    "views_window_total": None, "views_by_month": [],
+                                    "views_top_photos": [], "views_articles_counted": 0})
     return snapshot
 
 
@@ -5696,7 +5823,17 @@ def cmd_scan(args):
     if not by_list and not of_list and not amb_list:
         print("  no missing-category photos found. You may already be caught up.",
               file=sys.stderr)
-    if getattr(args, "views", False) and reach_metrics.get("views_status") == "unavailable":
+    if getattr(args, "views", False):
+        print("Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them.", file=sys.stderr)
+        print("Main Pages excluded: %d. Main Page lookups failed: %d. Article views deferred: %d." % (
+            reach_metrics.get("views_articles_excluded", 0),
+            len(reach_metrics.get("views_mainpage_lookup_failed", [])),
+            reach_metrics.get("views_articles_deferred", 0)), file=sys.stderr)
+        for photo in reach_metrics.get("views_excluded_photos", []):
+            print("  %s: article views excluded (only Main Page placements)." % photo["title"], file=sys.stderr)
+    if getattr(args, "views", False) and reach_metrics.get("views_status") == "excluded":
+        print("Article views excluded: your photos have only Main Page placements.", file=sys.stderr)
+    elif getattr(args, "views", False) and reach_metrics.get("views_status") == "unavailable":
         print("Article pageviews unavailable: %d requests failed; %d deferred." % (
             reach_metrics["views_articles_failed"], reach_metrics["views_articles_deferred"]),
             file=sys.stderr)
@@ -5704,7 +5841,7 @@ def cmd_scan(args):
         if reach_metrics.get("views_status") == "partial":
             print("Partial article pageviews: %d requests deferred." % reach_metrics["views_articles_deferred"], file=sys.stderr)
         print(
-            "Views: %s last month (%s), %s over %d months, across %s articles "
+            "Article views: %s last month (%s), %s over %d months, across %s articles "
             "(%s no data, %s failed)." % (
                 format(reach_metrics["views_last_month"], ","),
                 reach_metrics["views_window_end"],
@@ -5716,6 +5853,7 @@ def cmd_scan(args):
             ),
             file=sys.stderr,
         )
+        print("Based on articles carrying your photos at scan time. Your photos may not have been present throughout the period. These are article views, not photo views; each article counts once overall.", file=sys.stderr)
     return True
 
 
@@ -7643,6 +7781,7 @@ def check_web_review_html():
     views_metrics = {
         **scan_metrics,
         "views_window_end": "2026-07",
+        "views_mainpage_policy": "exclude-v1",
         "views_window_months": 3,
         "views_last_month": 123,
         "views_window_total": 321,
@@ -7663,8 +7802,8 @@ def check_web_review_html():
         all_photos=[item, categorized_item])
     for needle in (
             'id="pageviews-reach"',
-            "Article views last month",
-            "Article reach by photo last month",
+            'id="views-last-month-label"',
+            "Article views by photo",
             '"views_last_month": 123',
             'photo.commons_url',
             'scanMetrics.views_by_month.forEach'):
@@ -8248,8 +8387,17 @@ def check_pageviews_metrics():
     class FakeViewsClient:
         def __init__(self):
             self.urls = []
+            self.site_urls = []
 
         def rest_get(self, url, tries=6):
+            if "/w/api.php?" in url:
+                self.site_urls.append(url)
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+                titles = {"en.wikipedia.org": "Main Page", "fr.wikipedia.org": "Wikipédia:Accueil principal", "de.wikipedia.org": "Wikipedia:Hauptseite"}
+                title = titles[urllib.parse.urlsplit(url).hostname]
+                if "meta" in query:
+                    return {"query": {"general": {"mainpage": title}}}
+                return {"query": {"pages": [{"pageid": 1, "title": title}]}}
             self.urls.append(url)
             if "/Normal_article/" in url:
                 return {"items": [
@@ -8367,12 +8515,15 @@ def check_pageviews_metrics():
         for key in VIEWS_METRIC_KEYS:
             check_equal("pageviews review metric %s" % key, persisted.get(key), metrics[key])
 
-        class RateLimitedViewsClient:
+        class RateLimitedViewsClient(FakeViewsClient):
             def __init__(self):
+                super().__init__()
                 self.calls = 0
                 self.lock = threading.Lock()
 
             def rest_get(self, url, tries=6):
+                if "/w/api.php?" in url:
+                    return super().rest_get(url, tries=tries)
                 with self.lock:
                     self.calls += 1
                 raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
@@ -8423,6 +8574,94 @@ def check_pageviews_metrics():
                     unavailable_metrics["views_top_photos"], [])
         if unavailable_client.calls > 4:
             raise AssertionError("unavailable pageviews exceeded worker bound")
+
+        # Main Page exclusions must happen before cache reuse and aggregation.
+        main_use = {"wiki": "en.wikipedia.org", "lang": "en", "title": "Main_Page"}
+        de_main = {"wiki": "de.wikipedia.org", "lang": "de", "title": "Wikipedia:Hauptseite"}
+        mixed = {"wp": {"main": main_use, "normal": normal},
+                 "cats": set(), "uploader": "Photographer", "reason": {"author"}}
+        only_main = {"wp": {"main": main_use}}
+        main_photos = [("File:Mixed.jpg", mixed), ("File:Main only.jpg", only_main),
+                       ("File:German main.jpg", {"wp": {"main": de_main}})]
+        before_placements = [dict(rec["wp"]) for _, rec in main_photos]
+        main_cache = os.path.join(td, "mainpage-views.json")
+        write_views_cache(main_cache, {"version": VIEWS_CACHE_VERSION, "articles": {
+            "en.wikipedia|Main_Page": {month: 999999999 for month in cached_months},
+        }})
+        main_client = FakeViewsClient()
+        main_metrics = pageviews_metrics(main_photos, months=3, today=fixed_today,
+                                        cache_path=main_cache, client=main_client)
+        check_equal("mainpage last-month exclusion", main_metrics["views_last_month"], 30)
+        check_equal("mainpage window exclusion", main_metrics["views_window_total"], 60)
+        check_equal("mainpage distinct eligible count", main_metrics["views_articles_requested"], 1)
+        check_equal("mainpage distinct excluded count", main_metrics["views_articles_excluded"], 2)
+        check_equal("mainpage mixed-photo ranking", main_metrics["views_top_photos"][0]["views_last_month"], 30)
+        check_equal("mainpage only-photo null totals",
+                    [p["views_last_month"] for p in main_metrics["views_excluded_photos"]], [None, None])
+        check_equal("mainpage only-photo status",
+                    {p["views_status"] for p in main_metrics["views_excluded_photos"]}, {"excluded"})
+        check_equal("mainpage source placements retained", [rec["wp"] for _, rec in main_photos], before_placements)
+        check_equal("mainpage view API calls exclude cached mainpage", len(main_client.urls), 1)
+        check_equal("mainpage per-project lookup once", len(main_client.site_urls), 4)
+        pageviews_metrics(main_photos, months=3, today=fixed_today,
+                          cache_path=main_cache, client=main_client)
+        check_equal("mainpage persistent cache reuse", len(main_client.site_urls), 4)
+        check_equal("mainpage article cache reuse", len(main_client.urls), 1)
+        main_payload = load_views_cache(main_cache)
+        main_payload["mainpages"]["en.wikipedia"]["checked_at"] = time.time() - MAINPAGE_CACHE_MAX_AGE - 1
+        write_views_cache(main_cache, main_payload)
+        pageviews_metrics(main_photos, months=3, today=fixed_today,
+                          cache_path=main_cache, client=main_client)
+        check_equal("expired mainpage title refreshed", len(main_client.site_urls), 6)
+        check_equal("expired mainpage refresh preserves article cache", len(main_client.urls), 1)
+        check_equal("future mainpage timestamp rejected", cached_mainpage_titles(
+                    {"titles": ["Main_Page"], "checked_at": time.time() + 1000}, time.time()), None)
+        for fmt, ext in (("markdown", "md"), ("org", "org")):
+            review = os.path.join(td, "mainpage-review." + ext)
+            main_meta = dict(meta, **main_metrics)
+            write_review({"File:Mixed.jpg": mixed}, {}, {}, main_meta, review, fmt)
+            with open(review, encoding="utf-8") as handle:
+                if "Main_Page" not in handle.read():
+                    raise AssertionError("Main Page disappeared from review placement")
+            check_equal("mainpage policy review round trip", review_scan_metrics(review)["views_mainpage_policy"], "exclude-v1")
+        from credit_check_reports import make_snapshot, render_reach_report, export_snapshot_json
+        main_items = [all_photos_item(title, rec, "Photographs by Test Person", i)
+                      for i, (title, rec) in enumerate(main_photos)]
+        snapshot = make_snapshot({"author": "Test Person"}, {}, main_items, main_metrics)
+        check_equal("mainpage snapshot placement count", snapshot["metrics"]["placement_total"], 4)
+        check_equal("mainpage snapshot inventory page count", snapshot["metrics"]["article_total"], 3)
+        rendered = render_reach_report(snapshot)
+        if "Main_Page" not in rendered or "only Main Page placements" not in rendered:
+            raise AssertionError("report lost Main Page placement or exclusion state")
+        json_out = export_snapshot_json(os.path.join(td, "mainpage-report.json"), snapshot)
+        with open(json_out, encoding="utf-8") as handle:
+            check_equal("mainpage policy JSON round trip", json.load(handle)["snapshot"]["metrics"]["views_articles_excluded"], 2)
+        all_excluded = pageviews_metrics([("File:Only.jpg", only_main)], months=3,
+                                        today=fixed_today, client=FakeViewsClient())
+        check_equal("only mainpage overall status", all_excluded["views_status"], "excluded")
+        check_equal("only mainpage overall not zero", all_excluded["views_window_total"], None)
+        check_equal("only mainpage not measured", all_excluded["views_articles_counted"], 0)
+        check_equal("only mainpage not no-data", all_excluded["views_articles_no_data"], 0)
+
+        class LookupFailureClient(FakeViewsClient):
+            def rest_get(self, url, tries=6):
+                if "en.wikipedia.org/w/api.php" in url:
+                    raise urllib.error.URLError("siteinfo unavailable")
+                return super().rest_get(url, tries=tries)
+        failed_cache = os.path.join(td, "failed-mainpage.json")
+        write_views_cache(failed_cache, {"version": VIEWS_CACHE_VERSION,
+                          "articles": {"en.wikipedia|Normal_article": cached_months}})
+        unknown = pageviews_metrics(photos, months=3, today=fixed_today,
+                                   cache_path=failed_cache, client=LookupFailureClient())
+        check_equal("failed lookup defers cached wiki views", unknown["views_articles_deferred"], 1)
+        check_equal("failed lookup project disclosed", unknown["views_mainpage_lookup_failed"], ["en.wikipedia"])
+        check_equal("failed lookup remaining wiki totals", unknown["views_last_month"], 7)
+        check_equal("failed lookup partial status", unknown["views_status"], "partial")
+        recovered_client = FakeViewsClient()
+        recovered = pageviews_metrics(photos, months=3, today=fixed_today,
+                                      cache_path=failed_cache, client=recovered_client)
+        check_equal("failed lookup retried next run", recovered["views_mainpage_lookup_failed"], [])
+        check_equal("failed lookup never cached as success", len(recovered_client.site_urls), 2)
 
 
 def check_zero_candidate_scan_no_review():

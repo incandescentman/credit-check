@@ -78,7 +78,7 @@ When you're done, you can also start over with a different photographer.
 
 Choose ~Create a reach report~ in the guided app to export your complete photo gallery, its Wikipedia articles and language editions, and changes since your previous matching scan. You can optionally include the last 12 complete months of article pageviews. The HTML report opens in your browser and can be saved as a PDF using Print. It includes links to the photographs and the articles that use them.
 
-The report counts views of Wikipedia articles carrying your photographs, rather than views of the image files. Shared articles count once in the overall total. If the pageview service is unavailable or returns only some results, the report says so; missing measurements are never presented as measured zeroes.
+The report shows past views of Wikipedia articles carrying your photos at scan time. Your photos may not have been on those pages for the whole reporting period. Article views do not measure how often someone saw your photos. Shared articles count once in the overall total. Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them. If the pageview service is unavailable or returns only some results, the report says so; missing measurements are never presented as measured zeroes.
 
 Each new scan keeps a dated snapshot and preserves the previous review before replacing it. Comparisons use the same photographer and scan settings, so a filter change cannot masquerade as newly added or removed placements. Older saved reviews without a recorded scan date retain that uncertainty. Local history and reports stay on your computer.
 
@@ -281,13 +281,13 @@ Add =--views= when you need a current reach figure for a credential letter, pres
 
 : credit-check scan --views
 
-Credit Check already knows every Wikipedia article that carries each photo, so this optional step asks the Wikimedia pageviews API for those articles and reports their combined reach. It counts views of the Wikipedia articles that carry your photos, not requests for the image files themselves. That is the standard GLAM meaning behind wording such as photos that "reach" a given number of views.
+This optional step fetches past pageviews for the Wikipedia articles found in your scan. The totals describe those articles' readership. They do not measure how often someone saw your photos, and they do not establish that your photos were present throughout the reporting period: if a photo was added yesterday, the article's views from last month still count. Main Page placements stay listed but their pageviews are excluded, because a single day on a Main Page can add millions of views. Credit Check asks each Wikipedia for its own Main Page title; if that lookup fails, views from that Wikipedia are deferred and the report says so. A photo used only on Main Pages shows as excluded, not as a measured zero. Article views saved by earlier versions stay hidden until you create a new reach report with article views.
 
 The default window is the 12 complete calendar months ending with the last complete UTC month. Use =--views-months N= to request from 1 through 24 months. The current partial month is never included.
 
-: Views: 4,120,338 last month (2026-07), 38,207,911 over 12 months, across 1,429 articles (3 no data, 0 failed).
+: Article views: 4,120,338 last month (2026-07), 38,207,911 over 12 months, across 1,429 articles (3 no data, 0 failed).
 
-Overall totals count each distinct Wikipedia article once, even if it carries more than one of your photos. In the per-photo top ten, however, an article that carries two of your photos contributes its full article views to both photos. The browser reach ledger shows the last complete month, the full window, monthly totals, and links to the ten photos with the most article views in the last month.
+Overall totals count each distinct Wikipedia article once, even if it carries more than one of your photos. In the per-photo top ten, however, an article that carries two of your photos contributes its full article views to both photos. Do not add the per-photo totals together; shared articles would be counted more than once. The browser reach ledger shows the last complete month, the full window, monthly totals, and links to the ten photos with the most article views in the last month.
 
 Results are cached beside the review files in [[file:.credit-check-views.json][.credit-check-views.json]]. Credit Check reuses an article only when the cache contains every requested month; otherwise it refreshes that article's complete window. A normal scan without =--views= does not read, write, or report pageviews.
 

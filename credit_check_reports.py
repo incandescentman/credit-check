@@ -28,7 +28,8 @@ _METRIC_KEYS = (
     "views_window_end", "views_window_months", "views_window_total",
     "views_by_month", "views_top_photos", "views_articles_counted",
     "views_articles_requested", "views_articles_no_data", "views_articles_failed",
-    "views_articles_deferred",
+    "views_articles_deferred", "views_mainpage_policy", "views_articles_excluded",
+    "views_mainpage_lookup_failed", "views_excluded_photos",
 )
 
 
@@ -373,23 +374,42 @@ def render_reach_report(snapshot, comparison=None, title=None):
     ))
     views = ""
     if "views_last_month" in metrics:
+        mainpage_policy = metrics.get("views_mainpage_policy")
         status = metrics.get("views_status", "complete")
         counted = metrics.get("views_articles_counted", 0)
         requested = metrics.get("views_articles_requested", counted)
         no_data = metrics.get("views_articles_no_data", 0)
         failed = metrics.get("views_articles_failed", 0)
         deferred = metrics.get("views_articles_deferred", 0)
-        explanation = ('<p class="note">These are views of the distinct Wikipedia article pages carrying the photos, not views or requests for the image files. Overall totals count each article page once even when it carries more than one photo.</p>')
-        availability = ('<p class="note">Articles measured: %s of %s. No pageview data: %s. Failed requests: %s. Deferred after the service became unavailable: %s.</p>' %
-                        tuple(map(_e, (_number(counted), _number(requested), _number(no_data),
-                                       _number(failed), _number(deferred)))))
-        if status == "unavailable" or metrics.get("views_last_month") is None:
-            views = ('<section><h2>Article reach unavailable</h2>'
+        excluded = metrics.get("views_articles_excluded", 0)
+        lookup_failed = metrics.get("views_mainpage_lookup_failed", [])
+        if not isinstance(lookup_failed, list):
+            lookup_failed = []
+        explanation = ('<p class="note">These totals show views of Wikipedia articles that carried your photos when this scan ran. Your photos may not have been on those pages for the whole period. Article views do not measure how often someone saw your photos. Each article counts once in the overall total. Your Main Page placements stay listed but are excluded from view totals because a brief appearance can inflate them.</p>')
+        lookup_note = ""
+        if lookup_failed:
+            lookup_note = (' Main Page lookup failed for %s Wikipedia %s (%s), so every article from %s was deferred.' % (
+                _number(len(lookup_failed)), "project" if len(lookup_failed) == 1 else "projects",
+                ", ".join(_e(project) for project in lookup_failed),
+                "that project" if len(lookup_failed) == 1 else "those projects"))
+        availability = ('<p class="note">Articles measured: %s of %s. Main Page articles excluded: %s. No pageview data: %s. Failed requests: %s. Deferred article views: %s.%s</p>' %
+                        (tuple(map(_e, (_number(counted), _number(requested), _number(excluded),
+                                        _number(no_data), _number(failed), _number(deferred)))) +
+                         (lookup_note,)))
+        if mainpage_policy != "exclude-v1":
+            views = ('<section><h2>Article views need updating</h2>'
+                     '<p>This report predates Main Page exclusion. Regenerate it with article views to calculate comparable totals.</p></section>')
+        elif status == "excluded":
+            views = ('<section><h2>Article views excluded</h2>'
+                     '<p>All placements eligible for article-view measurement were Main Page placements. They remain listed below, but no article-view total is presented.</p>'
+                     + explanation + availability + '</section>')
+        elif status == "unavailable" or metrics.get("views_last_month") is None:
+            views = ('<section><h2>Article views unavailable</h2>'
                      '<p>Wikipedia article pageviews could not be measured for this report. No pageview total is presented.</p>'
                      + explanation + availability + '</section>')
         else:
             qualifier = "Partial measurement · " if status == "partial" else ""
-            views = ('<section><h2>%sArticle reach</h2><div class="viewgrid"><div><strong>%s</strong><span>article views in %s</span></div>'
+            views = ('<section><h2>%sArticle views</h2><div class="viewgrid"><div><strong>%s</strong><span>article views in %s</span></div>'
                      '<div><strong>%s</strong><span>article views across %s months</span></div></div>%s%s</section>') % (
                          _e(qualifier), _e(_number(metrics.get("views_last_month"))),
                          _e(metrics.get("views_window_end", "measurement month unavailable")),
@@ -433,13 +453,23 @@ def render_reach_report(snapshot, comparison=None, title=None):
                            len(comparison.get("removed_photos", [])), len(comparison.get("added_placements", [])),
                            len(comparison.get("removed_placements", []))))) + (change_details,))
     photo_sections = []
+    excluded_photos = {}
+    if metrics.get("views_mainpage_policy") == "exclude-v1":
+        for photo in metrics.get("views_excluded_photos", []):
+            if (isinstance(photo, dict) and isinstance(photo.get("title"), str)
+                    and photo.get("views_status") == "excluded"):
+                excluded_photos[photo["title"]] = photo
     for item in snapshot["items"]:
         filename = item["title"][5:] if item["title"].startswith("File:") else item["title"]
         commons = "https://commons.wikimedia.org/wiki/File:" + quote(filename.replace(" ", "_"), safe="/:,-")
         article_links = "".join("<li>%s <small>%s</small></li>" % (_safe_link(a["url"], a["title"]), _e(a["wiki"])) for a in item["articles"])
         caption = '<p class="caption">%s</p>' % _e(item["caption"]) if item.get("caption") else ""
-        photo_sections.append('<article><h3>%s</h3>%s<p>%s · %s placements</p><ul>%s</ul></article>' % (
-            _safe_link(commons, item["label"]), caption, _e(attribution), _number(len(item["articles"])), article_links))
+        photo_views = ""
+        if item["title"] in excluded_photos:
+            photo_views = '<p class="note">Article views: excluded — only Main Page placements.</p>'
+        photo_sections.append('<article><h3>%s</h3>%s<p>%s · %s placements</p>%s<ul>%s</ul></article>' % (
+            _safe_link(commons, item["label"]), caption, _e(attribution),
+            _number(len(item["articles"])), photo_views, article_links))
     scan_date = _display_timestamp(snapshot["scanned_at"])
     return """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>%s</title><style>
 :root{--paper:#f7f7f3;--white:#fff;--ink:#15171c;--muted:#5b6068;--line:#e5e5df;--green:#0b5738}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}main{max-width:1080px;margin:auto;padding:56px 32px 80px}header{border-top:5px solid var(--green);padding-top:24px}h1{margin:.15em 0;font:400 clamp(38px,7vw,72px)/1.02 Georgia,serif;letter-spacing:-.03em}.eyebrow,h2{color:var(--green);font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.byline,.note,.caption,small{color:var(--muted)}.metrics{display:grid;grid-template-columns:repeat(3,1fr);margin:40px 0;background:var(--white);border:1px solid var(--line)}.metric{padding:28px;border-top:2px solid var(--ink)}.metric+.metric{border-left:1px solid var(--line)}.metric strong,.viewgrid strong{display:block;color:var(--green);font:400 56px/1 Georgia,serif}.metric span,.viewgrid span{display:block;margin-top:10px;font-weight:700}section{margin:44px 0}.viewgrid,.changes{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.viewgrid>div,.changes span{padding:20px;background:var(--white);border:1px solid var(--line)}.change-details{margin-top:18px}.change-details details{margin:8px 0;padding:12px 16px;background:var(--white);border:1px solid var(--line)}.change-details summary{cursor:pointer;font-weight:700}.change-details summary b{color:var(--green);float:right}article{break-inside:avoid;margin:0 0 18px;padding:22px;background:var(--white);border:1px solid var(--line)}article h3{margin:0;font:400 24px/1.25 Georgia,serif}a{color:var(--green);text-decoration-thickness:1px;text-underline-offset:3px}ul{columns:2;column-gap:32px;padding-left:22px}li{break-inside:avoid;margin:.35em 0}small{display:block}@media(max-width:700px){main{padding:32px 18px}.metrics,.viewgrid,.changes{grid-template-columns:1fr}.metric+.metric{border-left:0}.metric strong{font-size:46px}ul{columns:1}}@media print{body{background:#fff}main{max-width:none;padding:0}.metrics,article,.viewgrid>div,.changes span,.change-details details{background:#fff}details{display:block}details>summary{list-style:none}details>summary::marker{display:none}details:not([open])>*:not(summary){display:block}a{color:inherit;text-decoration:none}header{padding-top:14px}section{margin:28px 0}}
