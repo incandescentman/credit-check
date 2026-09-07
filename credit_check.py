@@ -25,7 +25,8 @@ CONFIG (flags override environment and local preferences)
     --by-category  / WIKI_BY_CATEGORY   default: "Photographs by <author>"
     --of-category  / WIKI_OF_CATEGORY   category for photos of you
     --qid          / WIKI_QID           your Wikidata id (e.g. Q42) for depicts (P180)
-    .credit-check.json / --review-format   markdown by default; set org locally
+    .credit-check.json                     saved identity and scan preferences
+    --review-format                        markdown by default; set org locally
 
 EXAMPLES
     credit-check                              # guided mode
@@ -51,7 +52,7 @@ questionary and prompt_toolkit provide the installed command's interactive UI;
 direct script mode falls back to plain prompts if they are unavailable.
 """
 
-import argparse, builtins, getpass, html, http.cookiejar, http.server, io, json, os, re, shlex, shutil, sys, tempfile, textwrap, threading, time, webbrowser
+import argparse, builtins, calendar, concurrent.futures, datetime, getpass, html, http.cookiejar, http.server, io, json, os, re, secrets, shlex, shutil, sys, tempfile, textwrap, threading, time, webbrowser
 import urllib.parse, urllib.request, urllib.error
 
 try:
@@ -73,7 +74,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.1.12"
+__version__ = "1.2.0"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -162,6 +163,27 @@ class Client:
             retry_post=True,
             headers={"Promise-Non-Write-API-Action": "true"},
         )
+
+    def rest_get(self, url, tries=6):
+        """Read JSON from a REST endpoint with the read-request retry policy."""
+        for attempt in range(tries):
+            try:
+                request = urllib.request.Request(url)
+                with self.opener.open(request, timeout=60) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as error:
+                if error.code in (429, 503) and attempt < tries - 1:
+                    headers = error.headers or {}
+                    wait = int(headers.get("Retry-After") or 0) or 2 ** attempt
+                    print("  rate-limited, waiting %ss..." % wait, file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                raise
+            except urllib.error.URLError:
+                if attempt < tries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------- Wikidata lookup
@@ -407,6 +429,73 @@ def author_context(text):
 def name_matches(text, name):
     return bool(name and re.search(r"(?<!\w)%s(?!\w)" % re.escape(name), text, re.I))
 
+NONPHOTOGRAPHER_ROLE_RE = re.compile(
+    r"(?:retouch(?:ed|ing)?|edit(?:ed|ing)?|upload(?:ed|ing)?|crop(?:ped|ping)?|"
+    r"scan(?:ned|ning)?|digitiz(?:ed|ing)|restor(?:ed|ing)|colori[sz](?:ed|ing)?)"
+    r"(?:\s+(?:and|/|&|,))?\s*(?:by\s*)?[:=\-]?\s*$",
+    re.I,
+)
+PHOTOGRAPHER_ROLE_RE = re.compile(
+    r"(?:photo(?:graph)?(?:ed)?|photographer|image)\s*(?:by\s*)?[:=\-]?\s*$|\bby\s*$",
+    re.I,
+)
+
+
+def attribution_identity_mentions(text, username, author):
+    """Identity occurrences in credit text, with strong-link information."""
+    mentions = []
+    patterns = []
+    if username:
+        patterns.append((
+            re.compile(r"\[\[\s*(?:User|Creator):\s*%s(?:[|\]#])" %
+                       re.escape(username), re.I),
+            True,
+        ))
+    if author:
+        patterns.extend((
+            (re.compile(r"\[\[[^\]]*\|\s*%s\s*\]\]" % re.escape(author), re.I), True),
+            (re.compile(r"\{\{\s*Creator:\s*%s\s*\}\}" % re.escape(author), re.I), True),
+            (re.compile(r"(?<!\w)%s(?!\w)" % re.escape(author), re.I), False),
+        ))
+    for pattern, strong in patterns:
+        for match in pattern.finditer(text):
+            mentions.append((match.start(), match.end(), strong))
+    # A name inside a linked identity belongs to that same credit. Evaluate
+    # its role at the link boundary, rather than again inside the link label.
+    links = list(re.finditer(r"\[\[[^\]]*\]\]|\{\{Creator:[^}]*\}\}", text, re.I))
+    normalized = []
+    for start, end, strong in mentions:
+        container = next((link for link in links
+                          if link.start() <= start < link.end()), None)
+        if container:
+            start, end = container.span()
+        normalized.append((start, end, strong))
+    return sorted(set(normalized))
+
+
+def attribution_match(text, username, author):
+    """Return True only when credit text identifies the photographer safely."""
+    for start, end, strong in attribution_identity_mentions(text, username, author):
+        prefix = re.sub(r"\s+", " ", text[max(0, start - 48):start]).strip()
+        if NONPHOTOGRAPHER_ROLE_RE.search(prefix):
+            continue
+        suffix = text[end:].lstrip()
+        role = re.match(r"[(:\-]\s*([^);\n]+)", suffix)
+        if role and NONPHOTOGRAPHER_ROLE_RE.search(role.group(1).strip()):
+            continue
+        if PHOTOGRAPHER_ROLE_RE.search(prefix):
+            return True
+        if strong:
+            return True
+
+        plain = re.sub(r"<[^>]+>|\[\[|\]\]|\{\{|\}\}", " ", text)
+        plain = html.unescape(plain).replace("©", " ")
+        plain = re.sub(r"\s+", " ", plain).strip(" .,:-/")
+        if author and plain.casefold() == author.strip().casefold():
+            return True
+    return False
+
+
 def is_by(text, username, author):
     """True only if the author/photographer field credits this person.
 
@@ -416,11 +505,7 @@ def is_by(text, username, author):
     photographer falls through to ambiguous for a human.
     """
     actx = author_context(text)
-    if username and re.search(r"User:\s*%s\b" % re.escape(username), actx, re.I):
-        return True
-    if name_matches(actx, author):
-        return True
-    return False
+    return attribution_match(actx, username, author)
 
 def name_as_subject(text, author):
     """Name appears in the file text but not in the author context (subject-ish)."""
@@ -595,6 +680,252 @@ def wikipedia_reach_metrics(records):
     }
 
 
+PAGEVIEWS_API = "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article"
+VIEWS_CACHE_FILE = ".credit-check-views.json"
+VIEWS_CACHE_VERSION = 1
+VIEWS_METRIC_KEYS = (
+    "views_status",
+    "views_window_end",
+    "views_window_months",
+    "views_last_month",
+    "views_window_total",
+    "views_by_month",
+    "views_articles_counted",
+    "views_articles_requested",
+    "views_articles_no_data",
+    "views_articles_failed",
+    "views_articles_deferred",
+    "views_top_photos",
+)
+
+
+def shift_month(year, month, delta):
+    index = year * 12 + month - 1 + delta
+    return divmod(index, 12)[0], divmod(index, 12)[1] + 1
+
+
+def pageviews_window(months, today=None):
+    """Return month labels and REST dates ending at the last complete UTC month."""
+    if isinstance(months, bool) or not isinstance(months, int) or not 1 <= months <= 24:
+        raise ValueError("views months must be between 1 and 24")
+    if today is None:
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+    elif isinstance(today, datetime.datetime):
+        today = today.date()
+    current_month = today.replace(day=1)
+    end_date = current_month - datetime.timedelta(days=1)
+    start_year, start_month = shift_month(end_date.year, end_date.month, -(months - 1))
+    month_labels = []
+    for offset in range(months):
+        year, month = shift_month(start_year, start_month, offset)
+        month_labels.append("%04d-%02d" % (year, month))
+    start = "%04d%02d01" % (start_year, start_month)
+    end = "%04d%02d%02d" % (
+        end_date.year,
+        end_date.month,
+        calendar.monthrange(end_date.year, end_date.month)[1],
+    )
+    return month_labels, start, end
+
+
+def pageviews_project(use):
+    wiki = use.get("wiki") or ""
+    return wiki[:-4] if wiki.endswith(".org") else wiki
+
+
+def pageviews_article(use):
+    return (use.get("title") or "").replace(" ", "_")
+
+
+def pageviews_url(project, article, start, end):
+    return "%s/%s/all-access/user/%s/monthly/%s/%s" % (
+        PAGEVIEWS_API,
+        urllib.parse.quote(project, safe=""),
+        urllib.parse.quote(article, safe=""),
+        start,
+        end,
+    )
+
+
+def distinct_pageview_articles(records):
+    articles = {}
+    for rec in records:
+        for use in rec.get("all_wp", rec.get("wp", {})).values():
+            key = (pageviews_project(use), pageviews_article(use))
+            if key[0] and key[1]:
+                articles[key] = use
+    return articles
+
+
+def load_views_cache(path):
+    try:
+        with open(path, encoding="utf-8") as cache_file:
+            payload = json.load(cache_file)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"version": VIEWS_CACHE_VERSION, "articles": {}}
+    if (not isinstance(payload, dict)
+            or payload.get("version") != VIEWS_CACHE_VERSION
+            or not isinstance(payload.get("articles"), dict)):
+        return {"version": VIEWS_CACHE_VERSION, "articles": {}}
+    return payload
+
+
+def write_views_cache(path, payload):
+    atomic_write_text(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def pageviews_metrics(photo_records, months=12, today=None, cache_path=None,
+                      client=None, workers=1):
+    """Fetch and aggregate article pageviews globally and for each photo."""
+    photo_records = list(photo_records)
+    month_labels, start, end = pageviews_window(months, today=today)
+    article_uses = distinct_pageview_articles(rec for _title, rec in photo_records)
+    payload = load_views_cache(cache_path) if cache_path else {
+        "version": VIEWS_CACHE_VERSION,
+        "articles": {},
+    }
+    cached_articles = payload["articles"]
+    series_by_article = {}
+    no_data = set()
+    failed = set()
+    pending = []
+    for key in sorted(article_uses):
+        cache_key = "%s|%s" % key
+        cached = cached_articles.get(cache_key)
+        if (isinstance(cached, dict)
+                and all(isinstance(cached.get(month), int) for month in month_labels)):
+            series = {month: cached[month] for month in month_labels}
+            series_by_article[key] = series
+            if not any(series.values()):
+                no_data.add(key)
+        else:
+            pending.append(key)
+
+    rest_client = client or Client()
+    stop_fetching = threading.Event()
+
+    def fetch_one(key):
+        if stop_fetching.is_set():
+            return key, "deferred", None, None
+        project, article = key
+        url = pageviews_url(project, article, start, end)
+        try:
+            # A pageview request gets one network attempt.  Retrying 429/503
+            # inside every worker multiplies the wait and prevents this batch's
+            # shared circuit breaker from stopping the remaining requests.
+            response = rest_client.rest_get(url, tries=1)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                if os.environ.get("CREDIT_CHECK_DEBUG"):
+                    print("  pageviews no data: %s|%s" % key, file=sys.stderr)
+                return key, "no-data", {month: 0 for month in month_labels}, None
+            if error.code in (429, 503):
+                stop_fetching.set()
+                return key, "rate-limited", None, error
+            return key, "failed", None, error
+        except Exception as error:
+            return key, "failed", None, error
+        series = {month: 0 for month in month_labels}
+        try:
+            for item in response.get("items", []):
+                timestamp = str(item.get("timestamp") or "")
+                if len(timestamp) < 6:
+                    continue
+                month = "%s-%s" % (timestamp[:4], timestamp[4:6])
+                if month in series:
+                    series[month] = int(item.get("views") or 0)
+        except (AttributeError, TypeError, ValueError) as error:
+            return key, "failed", None, error
+        return key, "ok", series, None
+
+    dirty = False
+    deferred = set()
+    if pending:
+        max_workers = max(1, min(4, int(workers or 1), len(pending)))
+        if max_workers == 1:
+            results = map(fetch_one, pending)
+        else:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                results = executor.map(fetch_one, pending)
+                results = list(results)
+            finally:
+                executor.shutdown(wait=True)
+        for key, status, series, error in results:
+            if status in ("failed", "rate-limited"):
+                failed.add(key)
+                print("  pageviews failed: %s|%s (%s)" % (key[0], key[1], error),
+                      file=sys.stderr)
+                continue
+            if status == "deferred":
+                deferred.add(key)
+                continue
+            if status == "no-data":
+                no_data.add(key)
+            series_by_article[key] = series
+            cached_articles["%s|%s" % key] = series
+            dirty = True
+    if cache_path and dirty:
+        write_views_cache(cache_path, payload)
+
+    totals_by_month = {
+        month: sum(series[month] for series in series_by_article.values())
+        for month in month_labels
+    }
+    measured_count = len(series_by_article)
+    if not measured_count:
+        views_status = "unavailable"
+    elif measured_count == len(article_uses):
+        views_status = "complete"
+    elif measured_count:
+        views_status = "partial"
+    top_photos = []
+    for title, rec in photo_records:
+        article_keys = set(distinct_pageview_articles([rec]))
+        measured_keys = article_keys & set(series_by_article)
+        if not measured_keys:
+            continue
+        last_month = sum(series_by_article[key][month_labels[-1]]
+                         for key in measured_keys)
+        window_total = sum(
+            sum(series_by_article[key][month] for month in month_labels)
+            for key in measured_keys
+        )
+        top_photos.append({
+            "title": title,
+            "commons_url": commons_file_url(title),
+            "views_last_month": last_month,
+            "views_window_total": window_total,
+            "article_count": len(measured_keys),
+            "articles_total": len(article_keys),
+        })
+    top_photos.sort(key=lambda photo: (
+        -photo["views_last_month"],
+        -photo["views_window_total"],
+        photo["title"].casefold(),
+    ))
+    return {
+        "views_status": views_status,
+        "views_window_end": month_labels[-1],
+        "views_window_months": months,
+        "views_last_month": (totals_by_month[month_labels[-1]]
+                             if measured_count else None),
+        "views_window_total": (sum(totals_by_month.values())
+                               if measured_count else None),
+        "views_by_month": ([[month, totals_by_month[month]] for month in month_labels]
+                           if measured_count else []),
+        "views_articles_counted": measured_count,
+        "views_articles_requested": len(article_uses),
+        "views_articles_no_data": len(no_data),
+        "views_articles_failed": len(failed),
+        "views_articles_deferred": len(deferred),
+        "views_top_photos": top_photos[:10],
+    }
+
+
 def wikipedia_article_title(use):
     # MediaWiki commonly returns database-form titles with underscores. Keep
     # those in URLs, but present the article name the way Wikipedia does.
@@ -737,6 +1068,7 @@ def clear_review_files():
         all_photos_cache_path(path)
         for path in paths
     }
+    cache_paths.update(views_cache_path(path) for path in paths)
     for path in paths + sorted(cache_paths):
         if not (os.path.exists(path) or os.path.islink(path)):
             continue
@@ -804,6 +1136,13 @@ def all_photos_cache_path(review):
         ALL_PHOTOS_CACHE_FILE,
     )
 
+
+def views_cache_path(review):
+    return os.path.join(
+        os.path.dirname(os.path.abspath(review)),
+        VIEWS_CACHE_FILE,
+    )
+
 def all_photos_item(title, rec, target, line):
     uses = sorted_wikipedia_uses(rec.get("all_wp", rec.get("wp", {})))
     return {
@@ -856,7 +1195,7 @@ def load_all_photos_cache(review, review_items):
             payload = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-    if not isinstance(payload, dict) or payload.get("version") != ALL_PHOTOS_CACHE_VERSION:
+    if not isinstance(payload, dict) or payload.get("version") not in (1, ALL_PHOTOS_CACHE_VERSION):
         return None
     expected_titles = sorted(item["title"] for item in review_items)
     if payload.get("review_titles") != expected_titles:
@@ -879,6 +1218,7 @@ def load_all_photos_cache(review, review_items):
         normalized["uses"] = item.get("uses") if isinstance(item.get("uses"), int) else None
         normalized["articles"] = articles
         normalized["wikidata_items"] = wikidata_items
+        normalized["wikidata_available"] = payload.get("version") >= 2
         normalized["caption"] = item.get("caption", "")
         items.append(normalized)
     return items
@@ -924,18 +1264,29 @@ def org_item_block(title, rec):
     block.append("")
     return block
 
+
+def review_metrics_payload(meta):
+    metrics = {
+        "article_total": meta.get("article_total"),
+        "in_use_total": meta.get("in_use_total"),
+        "missing_category_total": meta.get("missing_category_total"),
+        "wikipedia_total": meta.get("wikipedia_total"),
+    }
+    if "views_window_end" in meta:
+        metrics.update({key: meta.get(key) for key in VIEWS_METRIC_KEYS})
+    for key in ("snapshot_id", "scanned_at", "scan_changes"):
+        if key in meta:
+            metrics[key] = meta[key]
+    return metrics
+
 def write_markdown(by_list, of_list, amb_list, meta, path):
     L = []
     include_by = meta.get("include_by", True)
     include_of = meta.get("include_of", True)
     include_ambiguous = meta.get("include_ambiguous", True)
     L.append("# Category review - %s" % meta["author"])
-    L.append("<!-- credit-check-metrics: %s -->" % json.dumps({
-        "article_total": meta.get("article_total"),
-        "in_use_total": meta.get("in_use_total"),
-        "missing_category_total": meta.get("missing_category_total"),
-        "wikipedia_total": meta.get("wikipedia_total"),
-    }, sort_keys=True))
+    L.append("<!-- credit-check-metrics: %s -->" % json.dumps(
+        review_metrics_payload(meta), sort_keys=True))
     L.append("")
     L.append("Pick photos in the browser:")
     L.append("")
@@ -977,12 +1328,8 @@ def write_org(by_list, of_list, amb_list, meta, path):
     include_ambiguous = meta.get("include_ambiguous", True)
     L.append("#+TITLE: Category review — %s" % meta["author"])
     L.append("#+STARTUP: content")
-    L.append("#+CREDIT_CHECK_METRICS: %s" % json.dumps({
-        "article_total": meta.get("article_total"),
-        "in_use_total": meta.get("in_use_total"),
-        "missing_category_total": meta.get("missing_category_total"),
-        "wikipedia_total": meta.get("wikipedia_total"),
-    }, sort_keys=True))
+    L.append("#+CREDIT_CHECK_METRICS: %s" % json.dumps(
+        review_metrics_payload(meta), sort_keys=True))
     L.append("")
     L.append("# Pick photos in the browser:")
     L.append("#   credit-check review %s" % review_path_arg(path))
@@ -1156,6 +1503,13 @@ def review_scan_metrics(path, fallback_missing=None):
                 value = parsed.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     metrics[key] = value
+            if isinstance(parsed.get("views_window_end"), str):
+                for key in VIEWS_METRIC_KEYS:
+                    if key in parsed:
+                        metrics[key] = parsed[key]
+            for key in ("snapshot_id", "scanned_at", "scan_changes"):
+                if key in parsed:
+                    metrics[key] = parsed[key]
             break
     return metrics
 
@@ -1309,6 +1663,7 @@ def web_review_payload(items):
             "uses": item["uses"],
             "articles": item.get("articles", []),
             "wikidata_items": item.get("wikidata_items", []),
+            "wikidata_available": item.get("wikidata_available", True),
             "caption": item.get("caption", ""),
             "file_url": commons_file_url(item["title"]),
             "thumb_url": commons_thumb_url(item["title"], width=420),
@@ -1327,7 +1682,8 @@ def review_items_signature(items):
 
 def web_review_html(review, approvable, ambiguous_count=0, initial_mode="all",
                     guided=False, scan_metrics=None, all_photos=None,
-                    initial_scope="missing"):
+                    initial_scope="missing", selection_revision=0,
+                    selection_token=""):
     if initial_mode not in ("all", "selected", "unselected"):
         initial_mode = "all"
     if initial_scope not in ("missing", "all"):
@@ -3097,6 +3453,21 @@ button.primary:focus-visible {
 .wikidata-reach-icon img { width: 18px; height: 18px; }
 .wikidata-reach-copy { display: flex; align-items: baseline; gap: 8px; }
 .wikidata-reach-kicker { color: var(--accent); }
+.pageviews-reach { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line-strong); }
+.pageviews-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pageviews-summary .reach-row { border-top-color: var(--line-strong); }
+.pageviews-summary .reach-row strong { font-size: clamp(46px, 5vw, 68px); }
+.pageviews-details { display: grid; grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr); gap: 32px; margin-top: 20px; }
+.pageviews-list-block { min-width: 0; }
+.pageviews-list-block h3 { margin: 0 0 10px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+.pageviews-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.pageviews-list li { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.35; }
+.pageviews-list strong { color: var(--ink); font-weight: 750; white-space: nowrap; }
+.pageviews-photo-list li { align-items: baseline; }
+.pageviews-photo-list a { min-width: 0; overflow: hidden; color: var(--ink); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.pageviews-photo-list a:hover,
+.pageviews-photo-list a:focus-visible { color: var(--accent-strong); text-decoration: underline; text-underline-offset: 2px; }
+.pageviews-photo-metrics { flex: 0 0 auto; color: var(--muted); text-align: right; }
 .workboard { margin: 28px 34px 44px; overflow: hidden; background: #fff; border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 24px 58px -46px rgba(20, 50, 40, 0.8); }
 .picker-content { border-right: 8px solid var(--panel-soft); border-left: 8px solid var(--panel-soft); }
 .scope-panel { display: block; background: #fff; }
@@ -3256,6 +3627,9 @@ button.primary:focus-visible {
   .reach-row strong { grid-column: 2; grid-row: 1; font-size: 54px; }
   .reach-icon { grid-column: 1; grid-row: 1; }
   .reach-label { grid-column: 3; grid-row: 1; }
+  .pageviews-summary { grid-template-columns: 1fr; }
+  .pageviews-summary .reach-row + .reach-row { padding-left: 0; background: none; }
+  .pageviews-details { grid-template-columns: 1fr; gap: 22px; }
   .scope-tabs,
   .scope-panel,
   .scope-description { width: 100%; max-width: none; }
@@ -3299,6 +3673,50 @@ button.primary:focus-visible {
   .photo-content { padding: 11px 17px 18px; }
   .action-rail { padding: 24px 14px; }
   .site-credit { align-items: flex-start; padding: 16px 14px; }
+}
+[hidden] { display: none !important; }
+.report-tools { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; margin-top: 16px; font-size: 13px; color: var(--muted); }
+.report-tools p { margin: 0; }
+.report-tools a { color: var(--accent); font-weight: 650; }
+.scan-changes { margin-top: 10px; font-size: 13px; color: var(--muted); }
+.scan-changes summary { cursor: pointer; color: var(--ink); }
+@media (max-width: 640px) {
+  .picker-shell .picker-header { padding: 16px 16px 12px; }
+  .product-lockup { gap: 8px; padding-bottom: 12px; }
+  .product-title { font-size: 29px; }
+  .product-tagline, .product-mission { display: none; }
+  .product-credit-wrap { margin: 0; }
+  .product-credit, .product-credit .wikiportraits-link span { font-size: 12px; }
+  .wikiportraits-logo { width: 23px; height: 23px; }
+  .task-row { margin-top: 12px; margin-bottom: 8px; }
+  .reach-statement { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .reach-row, .reach-row + .reach-row { display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start; gap: 3px; padding: 10px 7px; border-top: 0; }
+  .reach-row + .reach-row { border-left: 1px solid var(--line); }
+  .reach-row strong { font-size: 33px; line-height: 1.15; }
+  .reach-label { font-size: 11px; }
+  .reach-icon, .reach-sub, .scope-description, .scan-metrics-note, .keyboard-hint { display: none; }
+  .report-tools { margin-top: 9px; font-size: 11px; gap: 6px; }
+  .workboard { margin: 14px 12px 20px; }
+  .scope-tab { min-height: 57px; padding: 7px 3px; display: flex; align-items: center; justify-content: center; }
+  .scope-tab-icon { display: none; }
+  .scope-tab-title { font-size: 12px; }
+  .scope-tab-meta { font-size: 10px; }
+  .workboard-body { padding: 12px 10px; }
+  .missing-category-statement { font-size: 13px; line-height: 1.4; }
+  .review-counts { margin-top: 8px; }
+  #result-count { display: none; }
+  .primary-tools { margin-top: 8px; gap: 8px; }
+  .mode-tabs button { padding: 8px 5px; font-size: 12px; white-space: nowrap; min-width: 0; }
+  .bulk-tools { margin-top: 8px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  .bulk-tools button { min-height: 44px; padding: 6px 3px; font-size: 11px; line-height: 1.2; }
+  .mobile-save-actions { margin-top: 8px; }
+  .mobile-save-actions button { min-height: 40px; }
+  .picker-main { padding-top: 14px; }
+  .section-heading { margin-bottom: 10px; }
+  .section-heading h2 { font-size: 19px; }
+  .section-heading-meta { display: none; }
+  .pageviews-summary { grid-template-columns: 1fr 1fr; }
+  .pageviews-details { display: none; }
 }
 </style>
 </head>
@@ -3350,6 +3768,38 @@ button.primary:focus-visible {
                       <span class="wikidata-reach-line"><strong id="wikidata-photo-count">— photos</strong> are used on <strong id="wikidata-item-count">— Wikidata items</strong></span>
                     </span>
                   </div>
+                  <div class="report-tools">
+                    <p id="scan-date">Scan date not recorded</p>
+                    <a id="reach-report-link" href="/report" target="_blank" rel="noopener">Open reach report ↗</a>
+                  </div>
+                  <p class="scan-changes" id="pageviews-status" hidden></p>
+                  <details class="scan-changes" id="scan-changes" hidden>
+                    <summary>Changes since your previous scan</summary>
+                    <p id="scan-changes-summary"></p>
+                    <a href="/report" target="_blank" rel="noopener">See the changed photos and articles ↗</a>
+                  </details>
+                  <section class="pageviews-reach" id="pageviews-reach" aria-label="Wikipedia article pageviews" hidden>
+                    <div class="pageviews-summary">
+                      <div class="reach-row">
+                        <strong id="views-last-month">—</strong>
+                        <span class="reach-label">Article views last month<span class="reach-sub" id="views-last-month-label">last complete month</span></span>
+                      </div>
+                      <div class="reach-row">
+                        <strong id="views-window-total">—</strong>
+                        <span class="reach-label" id="views-window-label">Article views in this window<span class="reach-sub">across distinct Wikipedia article pages</span></span>
+                      </div>
+                    </div>
+                    <div class="pageviews-details">
+                      <section class="pageviews-list-block" aria-labelledby="views-by-month-title">
+                        <h3 id="views-by-month-title">By month</h3>
+                        <ul class="pageviews-list" id="views-by-month"></ul>
+                      </section>
+                      <section class="pageviews-list-block" aria-labelledby="views-top-photos-title">
+                        <h3 id="views-top-photos-title">Article reach by photo last month</h3>
+                        <ol class="pageviews-list pageviews-photo-list" id="views-top-photos"></ol>
+                      </section>
+                    </div>
+                  </section>
                 </div>
               </div>
             </div>
@@ -3467,12 +3917,23 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const reviewArg = window.CREDIT_CHECK_REVIEW_ARG;
   const ambiguousCount = window.CREDIT_CHECK_AMBIGUOUS_COUNT;
   const scanMetrics = window.CREDIT_CHECK_METRICS;
+  const scanDate = document.getElementById("scan-date");
+  if (scanMetrics.scanned_at) {
+    const parsedDate = new Date(scanMetrics.scanned_at);
+    if (!Number.isNaN(parsedDate.getTime())) scanDate.textContent = `Scanned ${parsedDate.toLocaleDateString(undefined, {year: "numeric", month: "short", day: "numeric"})}`;
+  }
+  const changes = scanMetrics.scan_changes;
+  if (changes && !changes.baseline) {
+    document.getElementById("scan-changes").hidden = false;
+    document.getElementById("scan-changes-summary").textContent = `${changes.added_photos} newly used photos · ${changes.removed_photos} photos no longer used · ${changes.added_placements} new article placements · ${changes.removed_placements} removed placements`;
+  }
   const guidedMode = Boolean(window.CREDIT_CHECK_GUIDED);
   const items = window.CREDIT_CHECK_ITEMS.map((item) => ({
     ...item,
     selected: Boolean(item.checked),
   }));
   const allPhotosAvailable = Boolean(window.CREDIT_CHECK_ALL_PHOTOS_AVAILABLE);
+  document.getElementById("reach-report-link").hidden = !allPhotosAvailable;
   const allPhotos = window.CREDIT_CHECK_ALL_PHOTOS.map((item) => ({
     ...item,
     selected: false,
@@ -3500,6 +3961,13 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   const wikidataReach = document.getElementById("wikidata-reach");
   const wikidataPhotoCount = document.getElementById("wikidata-photo-count");
   const wikidataItemCount = document.getElementById("wikidata-item-count");
+  const pageviewsReach = document.getElementById("pageviews-reach");
+  const viewsLastMonth = document.getElementById("views-last-month");
+  const viewsLastMonthLabel = document.getElementById("views-last-month-label");
+  const viewsWindowTotal = document.getElementById("views-window-total");
+  const viewsWindowLabel = document.getElementById("views-window-label");
+  const viewsByMonth = document.getElementById("views-by-month");
+  const viewsTopPhotos = document.getElementById("views-top-photos");
   const missingCategoryCount = document.getElementById("missing-category-count");
   const missingCategoryStatement = document.querySelector(".missing-category-statement");
   const photoNoun = document.getElementById("photo-noun");
@@ -3555,7 +4023,8 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   let lastFocusedLine = items.length ? items[0].line : null;
   let saveTimer = null;
   let pendingSave = false;
-  let selectionRevision = 0;
+  let selectionRevision = __SELECTION_REVISION__;
+  const selectionToken = __SELECTION_TOKEN_JSON__;
   let articleDialogOpener = null;
 
   screenTitle.textContent = "Your reach on Wikipedia";
@@ -3579,6 +4048,52 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
   } else {
     scanMetricsNote.textContent = "Scan again to calculate your complete Wikipedia reach.";
   }
+  const hasPageviews = Number.isInteger(scanMetrics.views_last_month)
+    && Number.isInteger(scanMetrics.views_window_total)
+    && typeof scanMetrics.views_window_end === "string"
+    && Number.isInteger(scanMetrics.views_window_months)
+    && Array.isArray(scanMetrics.views_by_month)
+    && Array.isArray(scanMetrics.views_top_photos);
+  const pageviewsStatus = document.getElementById("pageviews-status");
+  if (scanMetrics.views_status === "unavailable") {
+    pageviewsStatus.hidden = false;
+    pageviewsStatus.textContent = "Article pageviews are unavailable. The pageview service did not provide usable data for this report.";
+  } else if (scanMetrics.views_status === "partial") {
+    pageviewsStatus.hidden = false;
+    pageviewsStatus.textContent = `Partial article pageviews: ${scanMetrics.views_articles_counted} of ${scanMetrics.views_articles_requested} articles measured. ${scanMetrics.views_articles_failed} failed; ${scanMetrics.views_articles_deferred} deferred.`;
+  }
+  if (hasPageviews) {
+    pageviewsReach.hidden = false;
+    viewsLastMonth.textContent = scanMetrics.views_last_month.toLocaleString("en-US");
+    viewsLastMonthLabel.textContent = scanMetrics.views_window_end;
+    viewsWindowTotal.textContent = scanMetrics.views_window_total.toLocaleString("en-US");
+    viewsWindowLabel.firstChild.textContent = `Article views over ${scanMetrics.views_window_months} months`;
+    scanMetrics.views_by_month.forEach(([month, views]) => {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      const value = document.createElement("strong");
+      label.textContent = month;
+      value.textContent = Number(views).toLocaleString("en-US");
+      item.append(label, value);
+      viewsByMonth.append(item);
+    });
+    scanMetrics.views_top_photos.forEach((photo) => {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      const metrics = document.createElement("span");
+      link.href = photo.commons_url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = String(photo.title || "Untitled photo").replace(/^File:/, "");
+      metrics.className = "pageviews-photo-metrics";
+      const coverage = photo.articles_total && photo.article_count < photo.articles_total
+        ? `${photo.article_count} of ${photo.articles_total} articles measured`
+        : `${Number(photo.article_count).toLocaleString("en-US")} ${photo.article_count === 1 ? "article" : "articles"}`;
+      metrics.textContent = `${Number(photo.views_last_month).toLocaleString("en-US")} article views · ${coverage}`;
+      item.append(link, metrics);
+      viewsTopPhotos.append(item);
+    });
+  }
   const wikidataPhotos = allPhotos.filter((item) => (item.wikidata_items || []).length > 0);
   const wikidataItemIds = new Set(
     wikidataPhotos.flatMap((item) => item.wikidata_items.map((entry) => entry.id))
@@ -3600,7 +4115,10 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     : allPhotos.length;
   allRailPhotoCount.textContent = allPhotosTotal.toLocaleString("en-US");
   const allScopeLabel = `${allPhotosTotal.toLocaleString("en-US")} on Wikipedia`;
-  const wikidataScopeLabel = `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} · ${wikidataItemIds.size.toLocaleString("en-US")} ${wikidataItemIds.size === 1 ? "item" : "items"}`;
+  const wikidataKnown = allPhotosAvailable && allPhotos.every((item) => item.wikidata_available !== false);
+  const wikidataScopeLabel = wikidataKnown
+    ? `${wikidataPhotos.length.toLocaleString("en-US")} ${wikidataPhotos.length === 1 ? "photo" : "photos"} · ${wikidataItemIds.size.toLocaleString("en-US")} ${wikidataItemIds.size === 1 ? "item" : "items"}`
+    : "Not in saved scan";
   allScopeTab.disabled = !allPhotosAvailable;
   document.getElementById("wikidata-scope-tab").disabled = !wikidataPhotos.length;
   if (!allPhotosAvailable) {
@@ -3966,6 +4484,7 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
       selected_lines: selectedLines(),
       close: Boolean(closeAfter),
       revision: selectionRevision,
+      token: selectionToken,
     };
   }
 
@@ -4336,7 +4855,9 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
         "__METRICS_JSON__", metrics_json).replace(
         "__INITIAL_MODE_JSON__", initial_mode_json).replace(
         "__INITIAL_SCOPE_JSON__", initial_scope_json).replace(
-        "__GUIDED_JSON__", guided_json)
+        "__GUIDED_JSON__", guided_json).replace(
+        "__SELECTION_REVISION__", str(int(selection_revision))).replace(
+        "__SELECTION_TOKEN_JSON__", json.dumps(selection_token))
 
 class LocalReviewServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
@@ -4345,10 +4866,7 @@ class LocalReviewServer(http.server.ThreadingHTTPServer):
 def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mode="all",
                        guided=False, scan_metrics=None, all_photos=None,
                        initial_scope="missing"):
-    page = web_review_html(review, approvable, ambiguous_count, initial_mode,
-                           guided=guided, scan_metrics=scan_metrics,
-                           all_photos=all_photos,
-                           initial_scope=initial_scope).encode("utf-8")
+    initial_by_title = {item["title"]: item for item in items}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
@@ -4380,9 +4898,40 @@ def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mod
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
             if path in ("/", "/review"):
+                with self.server.review_lock:
+                    current_items = parse_review_items(review)
+                    if review_items_signature(current_items) != self.server.review_signature:
+                        self.send_bytes(
+                            409,
+                            ("%s changed on disk. Restart the photo picker before saving." %
+                             os.path.basename(review)).encode("utf-8"),
+                            "text/plain; charset=utf-8",
+                        )
+                        return
+                    for item in current_items:
+                        initial = initial_by_title.get(item["title"], {})
+                        item["wikidata_items"] = initial.get("wikidata_items", [])
+                    current_approvable = [item for item in current_items if item["target"]]
+                    self.server.review_page_token = secrets.token_urlsafe(24)
+                    self.server.review_client_revision = 0
+                    page = web_review_html(
+                        review, current_approvable, ambiguous_count, initial_mode,
+                        guided=guided, scan_metrics=scan_metrics,
+                        all_photos=all_photos, initial_scope=initial_scope,
+                        selection_revision=self.server.review_client_revision,
+                        selection_token=self.server.review_page_token,
+                    ).encode("utf-8")
                 self.send_bytes(200, page, "text/html; charset=utf-8")
             elif path == "/health":
                 self.send_json(200, {"ok": True})
+            elif path == "/report":
+                try:
+                    from credit_check_reports import render_reach_report
+                    snapshot = report_snapshot(review)
+                    report_html = render_reach_report(snapshot, snapshot.get("comparison"))
+                    self.send_bytes(200, report_html.encode("utf-8"), "text/html; charset=utf-8")
+                except (ValueError, TypeError, OSError) as error:
+                    self.send_bytes(409, str(error).encode("utf-8"), "text/plain; charset=utf-8")
             else:
                 self.send_json(404, {"ok": False, "error": "Not found"})
 
@@ -4403,24 +4952,31 @@ def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mod
 
                 close_after = bool(data.get("close"))
                 with self.server.review_lock:
+                    token = data.get("token")
+                    if not token or not secrets.compare_digest(
+                            str(token), self.server.review_page_token or ""):
+                        self.send_json(409, {
+                            "ok": False,
+                            "stale": True,
+                            "error": "This browser tab is out of date. Reload it before saving.",
+                        })
+                        return
                     revision = data.get("revision")
                     if revision is not None:
                         revision = int(revision)
-                        if revision < self.server.review_client_revision:
+                        if revision <= self.server.review_client_revision:
                             current_items = parse_review_items(review)
                             selected_count = len([
                                 item for item in current_items
                                 if item["target"] and item["checked"]
                             ])
                             self.server.saved_count = selected_count
-                            self.send_json(200, {
-                                "ok": True,
+                            self.send_json(409, {
+                                "ok": False,
                                 "selected": selected_count,
                                 "stale": True,
+                                "error": "This browser tab is out of date. Reload it before saving.",
                             })
-                            if close_after:
-                                threading.Thread(
-                                    target=self.server.shutdown, daemon=True).start()
                             return
 
                     current_items = parse_review_items(review)
@@ -4537,6 +5093,7 @@ def review_file_web(review, port=0, open_browser=True, fallback_on_open_failure=
     server.review_signature = review_items_signature(items)
     server.review_lock = threading.Lock()
     server.review_client_revision = -1
+    server.review_page_token = None
     server.saved_count = None
     url = server.review_origin + "/"
 
@@ -4799,10 +5356,117 @@ def review_file_with_pages(review, items, approvable):
 # ---------------------------------------------------------------- commands
 
 def resolve(args, name, env, default=None, required=False):
-    val = getattr(args, name, None) or os.environ.get(env) or default
+    val = (getattr(args, name, None) or os.environ.get(env)
+           or preference_value(name) or default)
     if required and not val:
-        sys.exit("Missing --%s (or %s). See --help." % (name.replace("_", "-"), env))
+        sys.exit("Missing --%s, %s, or %s in %s. See --help."
+                 % (name.replace("_", "-"), env, name, PREFERENCE_FILE))
     return val
+
+
+def views_months_arg(value):
+    try:
+        months = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be an integer from 1 to 24")
+    if not 1 <= months <= 24:
+        raise argparse.ArgumentTypeError("must be between 1 and 24")
+    return months
+
+
+def report_snapshot(review, include_views=False, months=12):
+    """Use the complete scan evidence, never the selected review subset."""
+    from credit_check_reports import make_snapshot, load_snapshot
+    metrics = review_scan_metrics(review)
+    snapshot_id = metrics.get("snapshot_id")
+    if snapshot_id:
+        snapshot = load_snapshot(review, snapshot_id)
+    else:
+        items = parse_review_items(review)
+        gallery = load_all_photos_cache(review, items)
+        if gallery is None:
+            raise ValueError("The complete photo gallery is unavailable. Scan again before creating a reach report.")
+        with open(review, encoding="utf-8") as source:
+            heading = source.readline().strip()
+        author = re.sub(r"^(?:# |\#\+TITLE:\s*)Category review - ", "", heading,
+                        flags=re.I)
+        if author == heading:
+            author = "Photographer"
+        snapshot = make_snapshot(
+            {"author": author},
+            {"legacy_import": True, "review_path": os.path.abspath(review)},
+            gallery, metrics, scanned_at=None)
+    if include_views:
+        records = []
+        for item in snapshot["items"]:
+            uses = {(a["wiki"], a["title"]): a for a in item["articles"]}
+            records.append((item["title"], {"wp": uses, "all_wp": uses}))
+        print("Fetching article pageviews for your reach report...", file=sys.stderr)
+        snapshot["metrics"].update(pageviews_metrics(
+            records, months=months, cache_path=views_cache_path(review)))
+    return snapshot
+
+
+def archive_existing_review(review):
+    """Preserve legacy review evidence before replacing a working review."""
+    if not os.path.isfile(review):
+        return
+    from credit_check_reports import archive_snapshot, load_snapshot
+    metrics = review_scan_metrics(review)
+    if metrics.get("snapshot_id"):
+        # The original scan is already immutable. Preserve later selections too.
+        load_snapshot(review, metrics["snapshot_id"])
+    with open(review, encoding="utf-8") as source:
+        text = source.read()
+    history_dir = os.path.join(os.path.dirname(os.path.abspath(review)), ".credit-check-history")
+    os.makedirs(history_dir, exist_ok=True)
+    import hashlib
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    archive = os.path.join(history_dir, "review-%s%s" % (digest, os.path.splitext(review)[1]))
+    try:
+        with open(archive, "x", encoding="utf-8") as output:
+            output.write(text)
+    except FileExistsError:
+        with open(archive, encoding="utf-8") as source:
+            if source.read() != text:
+                raise ValueError("Archived review evidence does not match its fingerprint")
+    if metrics.get("snapshot_id"):
+        return
+    # A legacy review has no recorded scan date or scope. Archive it separately;
+    # do not manufacture a comparable baseline from today's saved preferences.
+    try:
+        snapshot = report_snapshot(review)
+    except ValueError:
+        return  # The exact review remains archived even if its gallery is missing.
+    from credit_check_reports import load_latest_matching
+    if load_latest_matching(review, snapshot["identity"], snapshot["scan_options"]) is None:
+        archive_snapshot(review, snapshot, review_text=text)
+
+
+def cmd_report(args):
+    from credit_check_reports import write_reach_report, export_snapshot_json, export_placements_csv
+    review = args.review or existing_review_default()
+    try:
+        snapshot = report_snapshot(review, getattr(args, "views", False),
+                                   getattr(args, "views_months", 12))
+        fmt = getattr(args, "format", "html")
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        out = os.path.abspath(os.path.expanduser(args.out or
+                              "credit-check-report-%s.%s" % (stamp, fmt)))
+        if fmt == "json":
+            export_snapshot_json(out, snapshot, snapshot.get("comparison"))
+        elif fmt == "csv":
+            export_placements_csv(out, snapshot)
+        else:
+            write_reach_report(out, snapshot, snapshot.get("comparison"))
+        print("Saved reach report: %s" % out)
+        if fmt == "html" and not getattr(args, "no_open", False):
+            from pathlib import Path
+            webbrowser.open_new_tab(Path(out).as_uri())
+        return out
+    except (OSError, ValueError, TypeError) as error:
+        print("Could not create the reach report: %s" % error, file=sys.stderr)
+        raise SystemExit(1)
 
 def cmd_scan(args):
     username = resolve(args, "username", "WIKI_USERNAME", required=True)
@@ -4909,12 +5573,23 @@ def cmd_scan(args):
             print("  promoted %d derivative crop(s) via source chain." % len(promoted),
                   file=sys.stderr)
 
-    metric_records = []
+    metric_photo_records = {}
     if include_by:
-        metric_records.extend(by_in_use.values())
+        metric_photo_records.update(by_in_use)
     if include_of:
-        metric_records.extend(of_in_use.values())
+        metric_photo_records.update(of_in_use)
+    metric_records = list(metric_photo_records.values())
     reach_metrics = wikipedia_reach_metrics(metric_records)
+    if getattr(args, "views", False):
+        views_months = getattr(args, "views_months", 12)
+        article_count = len(distinct_pageview_articles(metric_records))
+        print("  fetching %d distinct articles of pageviews..." % article_count,
+              file=sys.stderr)
+        reach_metrics.update(pageviews_metrics(
+            metric_photo_records.items(),
+            months=views_months,
+            cache_path=views_cache_path(out),
+        ))
     missing_category_total = (
         (len(by_missing_category) if include_by else 0) +
         (len(of_missing_category) if include_of else 0)
@@ -4967,12 +5642,40 @@ def cmd_scan(args):
         **reach_metrics,
         "missing_category_total": missing_category_total,
     }
+    from credit_check_reports import make_snapshot, archive_snapshot, load_latest_matching, compare_snapshots
+    snapshot = make_snapshot(
+        {"author": author, "username": username, "by_category": by_cat,
+         "of_category": of_cat, "qid": qid},
+        {"scan_mode": scan_mode, "min_uses": min_uses,
+         "english_only": english_only, "insource_user": insource_user,
+         "trace_derivatives": not no_derivatives, "depth": depth,
+         "attribution_contract": "2026-09-06"},
+        [all_photos_item(title, rec, target, -(index + 1))
+         for index, (title, rec, target) in enumerate(gallery_records)],
+        reach_metrics, scanned_at=datetime.datetime.now(datetime.timezone.utc))
+    previous = load_latest_matching(out, snapshot["identity"], snapshot["scan_options"])
+    comparison = compare_snapshots(previous, snapshot)
+    meta.update({"snapshot_id": snapshot["snapshot_id"], "scanned_at": snapshot["scanned_at"],
+                 "scan_changes": {
+                     "baseline": comparison["baseline"],
+                     "previous_scanned_at": comparison.get("previous_scanned_at"),
+                     **{key: len(comparison[key]) for key in
+                        ("added_photos", "removed_photos", "added_placements", "removed_placements")}}})
+    archive_existing_review(out)
     write_review(by_list, of_list, amb_list, meta, out, review_format)
     write_all_photos_cache(
         out,
         gallery_records,
         review_records_by_title.keys(),
     )
+    with open(out, encoding="utf-8") as written_review:
+        archive_snapshot(out, snapshot, review_text=written_review.read())
+    if not comparison["baseline"]:
+        print("Since your previous scan: %d newly used photos, %d photos no longer used; "
+              "%d new article placements, %d removed placements." % (
+                  len(comparison["added_photos"]), len(comparison["removed_photos"]),
+                  len(comparison["added_placements"]), len(comparison["removed_placements"])),
+              file=sys.stderr)
     if getattr(args, "guided", False):
         return True
     of_only_empty = include_of and not include_by and not include_ambiguous and not of_list
@@ -4993,6 +5696,26 @@ def cmd_scan(args):
     if not by_list and not of_list and not amb_list:
         print("  no missing-category photos found. You may already be caught up.",
               file=sys.stderr)
+    if getattr(args, "views", False) and reach_metrics.get("views_status") == "unavailable":
+        print("Article pageviews unavailable: %d requests failed; %d deferred." % (
+            reach_metrics["views_articles_failed"], reach_metrics["views_articles_deferred"]),
+            file=sys.stderr)
+    elif getattr(args, "views", False):
+        if reach_metrics.get("views_status") == "partial":
+            print("Partial article pageviews: %d requests deferred." % reach_metrics["views_articles_deferred"], file=sys.stderr)
+        print(
+            "Views: %s last month (%s), %s over %d months, across %s articles "
+            "(%s no data, %s failed)." % (
+                format(reach_metrics["views_last_month"], ","),
+                reach_metrics["views_window_end"],
+                format(reach_metrics["views_window_total"], ","),
+                reach_metrics["views_window_months"],
+                format(reach_metrics["views_articles_counted"], ","),
+                format(reach_metrics["views_articles_no_data"], ","),
+                format(reach_metrics["views_articles_failed"], ","),
+            ),
+            file=sys.stderr,
+        )
     return True
 
 
@@ -5845,7 +6568,7 @@ def check_guided_review_state():
                 os.environ.pop(key, None)
 
 def check_guided_menu_dispatch():
-    for value in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "review",
+    for value in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "report", "review",
                   "view_all", "settings", "start_over", "add", "quit"):
         check_equal("guided dispatch %s" % value,
                     interactive_choice_action(value), value)
@@ -5961,7 +6684,7 @@ def check_guided_menu_copy_matrix():
         scan_again = (
             "Scan again for new photos",
             "scan_by",
-            "Search again for new photos you've uploaded or that are newly used on Wikipedia. Replaces the photos found so far.",
+            "Search again for new photos you've uploaded or that are newly used on Wikipedia. Keeps a dated history and shows what changed.",
         )
         caught_up_scan = (
             "Scan again for new photos",
@@ -5988,6 +6711,10 @@ def check_guided_menu_copy_matrix():
             "view_all",
             "Open a read-only gallery of every photo from the latest scan that appears on Wikipedia.",
         )
+        report = (
+            "Create a reach report", "report",
+            "Export your photos, articles, languages, optional pageviews, and changes since the previous scan.",
+        )
         gaps = (
             "Decide which photos to upload next",
             "gaps",
@@ -6007,23 +6734,23 @@ def check_guided_menu_copy_matrix():
               "selected": 0, "ambiguous": 0, "review": "review.md",
               "review_mode": "by", "of_category": None,
               "all_photos_total": 8},
-             [caught_up_scan, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
+             [caught_up_scan, view_all, report, settings, start_over, gaps, photos_of_you, quit_action]),
             ("no photos of you",
              {"setup_complete": True, "exists": True, "total": 0,
               "selected": 0, "ambiguous": 0, "review": "review.md",
               "review_mode": "of", "of_category": "Test Person",
               "all_photos_total": 3},
-             [search_of_again, scan_again, view_all, settings, start_over, gaps, quit_action]),
+             [search_of_again, scan_again, view_all, report, settings, start_over, gaps, quit_action]),
             ("choose photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 1, "review": "review.md",
               "all_photos_total": 8},
-             [choose, scan_again, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
+             [choose, scan_again, view_all, report, settings, start_over, gaps, photos_of_you, quit_action]),
             ("selected photos",
              {"setup_complete": True, "exists": True, "total": 2,
               "selected": 1, "ambiguous": 0, "review": "review.md",
               "all_photos_total": 8},
-             [add, scan_again, choose, view_all, settings, start_over, gaps, photos_of_you, quit_action]),
+             [add, scan_again, choose, view_all, report, settings, start_over, gaps, photos_of_you, quit_action]),
             ("setup incomplete with photos",
              {"setup_complete": False, "exists": True, "total": 2,
               "selected": 0, "ambiguous": 0, "review": "review.md",
@@ -6134,6 +6861,7 @@ def check_guided_copy_messages():
 def check_review_preferences():
     old_cwd = os.getcwd()
     old_env = os.environ.pop(REVIEW_FORMAT_ENV, None)
+    old_username_env = os.environ.pop("WIKI_USERNAME", None)
     try:
         with tempfile.TemporaryDirectory(prefix="credit-check-self-test.") as td:
             os.chdir(td)
@@ -6185,6 +6913,15 @@ def check_review_preferences():
                         local_preferences().get("username"), "SavedUser")
             check_equal("empty local setting removed",
                         "qid" in local_preferences(), False)
+            scan_args = argparse.Namespace(username=None)
+            check_equal("direct scan uses saved identity",
+                        resolve(scan_args, "username", "WIKI_USERNAME"), "SavedUser")
+            os.environ["WIKI_USERNAME"] = "EnvUser"
+            check_equal("direct scan environment beats saved identity",
+                        resolve(scan_args, "username", "WIKI_USERNAME"), "EnvUser")
+            scan_args.username = "FlagUser"
+            check_equal("direct scan flag beats environment identity",
+                        resolve(scan_args, "username", "WIKI_USERNAME"), "FlagUser")
             check_equal(
                 "output extension beats local preference",
                 infer_review_format(argparse.Namespace(review_format=None, out="review.md")),
@@ -6194,6 +6931,9 @@ def check_review_preferences():
         os.chdir(old_cwd)
         if old_env is not None:
             os.environ[REVIEW_FORMAT_ENV] = old_env
+        os.environ.pop("WIKI_USERNAME", None)
+        if old_username_env is not None:
+            os.environ["WIKI_USERNAME"] = old_username_env
 
 def check_interactive_settings_core_only():
     old_cwd = os.getcwd()
@@ -6274,7 +7014,7 @@ def check_interactive_start_over():
                 "review_page_size": 12,
             })
             for path in ("custom-review.md", "review.md", "review.org",
-                         ALL_PHOTOS_CACHE_FILE):
+                         ALL_PHOTOS_CACHE_FILE, VIEWS_CACHE_FILE):
                 atomic_write_text(path, "old review\n")
             prompts = []
             confirmations = []
@@ -6321,7 +7061,7 @@ def check_interactive_start_over():
             check_equal("start-over preserved page size",
                         prefs.get("review_page_size"), 12)
             for path in ("custom-review.md", "review.md", "review.org",
-                         ALL_PHOTOS_CACHE_FILE):
+                         ALL_PHOTOS_CACHE_FILE, VIEWS_CACHE_FILE):
                 check_equal("start-over removed %s" % path, os.path.exists(path), False)
             check_equal("start-over scan calls", len(scan_calls), 1)
             args = scan_calls[0]
@@ -6900,6 +7640,36 @@ def check_web_review_html():
             "You can now close this tab"):
         if needle not in text:
             raise AssertionError("web review missing %r" % needle)
+    views_metrics = {
+        **scan_metrics,
+        "views_window_end": "2026-07",
+        "views_window_months": 3,
+        "views_last_month": 123,
+        "views_window_total": 321,
+        "views_by_month": [["2026-05", 88], ["2026-06", 110], ["2026-07", 123]],
+        "views_articles_counted": 21,
+        "views_articles_no_data": 1,
+        "views_articles_failed": 0,
+        "views_top_photos": [{
+            "title": "File:Example photo.jpg",
+            "commons_url": "https://commons.wikimedia.org/wiki/File:Example_photo.jpg",
+            "views_last_month": 123,
+            "views_window_total": 321,
+            "article_count": 2,
+        }],
+    }
+    views_text = web_review_html(
+        "review.md", [item], scan_metrics=views_metrics,
+        all_photos=[item, categorized_item])
+    for needle in (
+            'id="pageviews-reach"',
+            "Article views last month",
+            "Article reach by photo last month",
+            '"views_last_month": 123',
+            'photo.commons_url',
+            'scanMetrics.views_by_month.forEach'):
+        if needle not in views_text:
+            raise AssertionError("web review pageviews missing %r" % needle)
     if 'data-action="preview"' in text or 'data-action="hide-preview"' in text:
         raise AssertionError("web review should show Wikimedia Commons edits live without preview buttons")
     if "Review &amp; publish edits" in text or "Review & publish edits" in text:
@@ -7104,13 +7874,28 @@ def check_web_review_save():
         server.review_signature = review_items_signature(items)
         server.review_lock = threading.Lock()
         server.review_client_revision = -1
+        server.review_page_token = None
         server.saved_count = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            def page_state():
+                with urllib.request.urlopen(server.review_origin + "/", timeout=5) as resp:
+                    page = resp.read().decode("utf-8")
+                token_match = re.search(r'const selectionToken = ("[^"]+");', page)
+                revision_match = re.search(r'let selectionRevision = (\d+);', page)
+                if not token_match or not revision_match:
+                    raise AssertionError("browser page omitted save lease state")
+                return page, json.loads(token_match.group(1)), int(revision_match.group(1))
+
+            initial_page, initial_token, initial_revision = page_state()
+            if '"checked": false' not in initial_page:
+                raise AssertionError("initial browser did not render unselected state")
             body = json.dumps({
                 "selected_lines": [approvable[0]["line"]],
                 "close": False,
+                "revision": initial_revision + 1,
+                "token": initial_token,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -7124,10 +7909,17 @@ def check_web_review_save():
                         parse_approved(path, warn=False),
                         [("File:Example.jpg", "Photographs by Test Person")])
 
+            reloaded_page, reloaded_token, reloaded_revision = page_state()
+            if '"checked": true' not in reloaded_page:
+                raise AssertionError("reloaded browser did not render saved selection")
+            if "let selectionRevision = 0;" not in reloaded_page:
+                raise AssertionError("reloaded browser did not receive current revision")
+
             body = json.dumps({
-                "selected_lines": [approvable[0]["line"]],
+                "selected_lines": [],
                 "close": False,
-                "revision": 2,
+                "revision": reloaded_revision + 1,
+                "token": reloaded_token,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -7140,11 +7932,14 @@ def check_web_review_save():
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             check_equal("web save revision response", data["ok"], True)
+            check_equal("reloaded browser saved updated selection",
+                        parse_approved(path, warn=False), [])
 
             body = json.dumps({
-                "selected_lines": [],
+                "selected_lines": [approvable[0]["line"]],
                 "close": False,
-                "revision": 1,
+                "revision": 999999,
+                "token": initial_token,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -7154,17 +7949,22 @@ def check_web_review_save():
                     "Origin": server.review_origin,
                 },
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                raise AssertionError("stale browser revision unexpectedly succeeded")
+            except urllib.error.HTTPError as error:
+                check_equal("stale browser revision status", error.code, 409)
+                data = json.loads(error.read().decode("utf-8"))
             check_equal("stale browser revision ignored", data.get("stale"), True)
+            check_equal("stale browser revision reports failure", data.get("ok"), False)
             check_equal("stale browser revision kept selections",
-                        parse_approved(path, warn=False),
-                        [("File:Example.jpg", "Photographs by Test Person")])
+                        parse_approved(path, warn=False), [])
 
             body = json.dumps({
                 "selected_lines": [approvable[0]["line"]],
                 "close": True,
-                "revision": 3,
+                "revision": reloaded_revision + 2,
+                "token": reloaded_token,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -7206,14 +8006,23 @@ def check_web_review_stale_save():
         server.review_signature = review_items_signature(items)
         server.review_lock = threading.Lock()
         server.review_client_revision = -1
+        server.review_page_token = None
         server.saved_count = None
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
+            with urllib.request.urlopen(server.review_origin + "/", timeout=5) as resp:
+                page = resp.read().decode("utf-8")
+            token_match = re.search(r'const selectionToken = ("[^"]+");', page)
+            if not token_match:
+                raise AssertionError("browser page omitted save token")
+            page_token = json.loads(token_match.group(1))
             set_review_approvals(path, items, {approvable[0]["line"]})
             body = json.dumps({
                 "selected_lines": [],
                 "close": True,
+                "revision": 1,
+                "token": page_token,
             }).encode("utf-8")
             req = urllib.request.Request(
                 server.review_origin + "/save",
@@ -7395,13 +8204,25 @@ def check_scan_reach_totals():
                 depth=0, english_only=False, min_uses=1, review_format="markdown",
                 out="review.md", scan_mode="by", guided=True)
             check_equal("reach scan wrote review", cmd_scan(args), True)
+            saved_metrics = review_scan_metrics("review.md")
             check_equal("reach scan totals include categorized photos",
-                        review_scan_metrics("review.md"), {
+                        {key: saved_metrics[key] for key in
+                         ("article_total", "in_use_total", "missing_category_total", "wikipedia_total")}, {
                             "article_total": 3,
                             "in_use_total": 2,
                             "missing_category_total": 1,
                             "wikipedia_total": 3,
                         })
+            from credit_check_reports import load_snapshot
+            archived = load_snapshot("review.md", saved_metrics["snapshot_id"])
+            check_equal("first scan establishes history baseline", archived["comparison"]["baseline"], True)
+            check_equal("archive keeps complete scan counts", archived["metrics"]["in_use_total"], 2)
+            check_equal("next comparable scan writes review", cmd_scan(args), True)
+            next_metrics = review_scan_metrics("review.md")
+            next_snapshot = load_snapshot("review.md", next_metrics["snapshot_id"])
+            check_equal("next scan retains previous evidence", next_snapshot["comparison"]["previous_snapshot_id"], saved_metrics["snapshot_id"])
+            check_equal("unchanged scan has no new placements", next_metrics["scan_changes"]["added_placements"], 0)
+            check_equal("unchanged scan has no removed photos", next_metrics["scan_changes"]["removed_photos"], 0)
             items = parse_review_items("review.md")
             check_equal("reach scan grid excludes categorized photos", len(items), 1)
             check_equal("reach scan missing photo title", items[0]["title"],
@@ -7421,6 +8242,187 @@ def check_scan_reach_totals():
         globals()["fetch_details"] = old_fetch_details
         globals()["fetch_english_captions"] = old_fetch_captions
         os.chdir(old_cwd)
+
+
+def check_pageviews_metrics():
+    class FakeViewsClient:
+        def __init__(self):
+            self.urls = []
+
+        def rest_get(self, url, tries=6):
+            self.urls.append(url)
+            if "/Normal_article/" in url:
+                return {"items": [
+                    {"project": "en.wikipedia", "article": "Normal_article",
+                     "granularity": "monthly", "timestamp": "2026050100",
+                     "access": "all-access", "agent": "user", "views": 10},
+                    {"project": "en.wikipedia", "article": "Normal_article",
+                     "granularity": "monthly", "timestamp": "2026060100",
+                     "access": "all-access", "agent": "user", "views": 20},
+                    {"project": "en.wikipedia", "article": "Normal_article",
+                     "granularity": "monthly", "timestamp": "2026070100",
+                     "access": "all-access", "agent": "user", "views": 30},
+                ]}
+            if "/Missing_month/" in url:
+                return {"items": [
+                    {"project": "fr.wikipedia", "article": "Missing_month",
+                     "granularity": "monthly", "timestamp": "2026050100",
+                     "access": "all-access", "agent": "user", "views": 5},
+                    {"project": "fr.wikipedia", "article": "Missing_month",
+                     "granularity": "monthly", "timestamp": "2026070100",
+                     "access": "all-access", "agent": "user", "views": 7},
+                ]}
+            if "/A%2FB_%26_C/" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            raise AssertionError("unexpected pageviews URL %s" % url)
+
+    normal = {"wiki": "en.wikipedia.org", "lang": "en", "title": "Normal article"}
+    missing = {"wiki": "fr.wikipedia.org", "lang": "fr", "title": "Missing month"}
+    no_data = {"wiki": "de.wikipedia.org", "lang": "de", "title": "A/B & C"}
+    first_photo = {
+        "wp": {"normal": normal, "missing": missing, "no-data": no_data},
+        "all_wp": {"normal": normal, "missing": missing, "no-data": no_data},
+    }
+    second_photo = {
+        "wp": {"normal": normal},
+        "all_wp": {"normal": normal},
+    }
+    photos = [
+        ("File:First photo.jpg", first_photo),
+        ("File:Second photo.jpg", second_photo),
+    ]
+    fixed_today = datetime.date(2026, 8, 26)
+    check_equal("pageviews project strips .org", pageviews_project(normal), "en.wikipedia")
+    check_equal("pageviews article uses underscores", pageviews_article(normal),
+                "Normal_article")
+    check_equal("pageviews fixed window", pageviews_window(3, fixed_today), (
+        ["2026-05", "2026-06", "2026-07"], "20260501", "20260731"))
+
+    with tempfile.TemporaryDirectory(prefix="credit-check-pageviews-test.") as td:
+        cache_path = os.path.join(td, VIEWS_CACHE_FILE)
+        fake = FakeViewsClient()
+        metrics = pageviews_metrics(
+            photos, months=3, today=fixed_today, cache_path=cache_path,
+            client=fake, workers=4)
+        check_equal("pageviews one call per distinct article", len(fake.urls), 3)
+        if not any("/en.wikipedia/" in url for url in fake.urls):
+            raise AssertionError("pageviews URL did not strip .org from project")
+        if not any("/A%2FB_%26_C/" in url for url in fake.urls):
+            raise AssertionError("pageviews URL did not encode slash and ampersand")
+        check_equal("pageviews missing months zero-filled", metrics["views_by_month"], [
+            ["2026-05", 15], ["2026-06", 20], ["2026-07", 37]])
+        check_equal("pageviews last month sum", metrics["views_last_month"], 37)
+        check_equal("pageviews window sum", metrics["views_window_total"], 72)
+        check_equal("pageviews 404 count", metrics["views_articles_no_data"], 1)
+        check_equal("pageviews failed count", metrics["views_articles_failed"], 0)
+        check_equal("pageviews article count", metrics["views_articles_counted"], 3)
+        check_equal("pageviews complete status", metrics["views_status"], "complete")
+        check_equal("pageviews requested count", metrics["views_articles_requested"], 3)
+        check_equal("pageviews deferred count", metrics["views_articles_deferred"], 0)
+        check_equal("pageviews shared article global dedupe",
+                    metrics["views_window_total"], 72)
+        check_equal("pageviews shared article per-photo attribution",
+                    [(photo["title"], photo["views_last_month"],
+                      photo["views_window_total"], photo["article_count"])
+                     for photo in metrics["views_top_photos"]], [
+                         ("File:First photo.jpg", 37, 72, 3),
+                         ("File:Second photo.jpg", 30, 60, 1),
+                     ])
+
+        calls_after_first = len(fake.urls)
+        cached_metrics = pageviews_metrics(
+            photos, months=3, today=fixed_today, cache_path=cache_path,
+            client=fake, workers=4)
+        check_equal("pageviews complete cache skips fetches", len(fake.urls),
+                    calls_after_first)
+        check_equal("pageviews cached totals", cached_metrics["views_window_total"], 72)
+        check_equal("pageviews cached no-data count",
+                    cached_metrics["views_articles_no_data"], 1)
+
+        cache = load_views_cache(cache_path)
+        cache["articles"]["en.wikipedia|Normal_article"].pop("2026-06")
+        write_views_cache(cache_path, cache)
+        pageviews_metrics(
+            photos, months=3, today=fixed_today, cache_path=cache_path,
+            client=fake, workers=4)
+        check_equal("pageviews incomplete cache refetches article", len(fake.urls),
+                    calls_after_first + 1)
+
+        review_path = os.path.join(td, "review.md")
+        meta = {
+            "author": "Test Person",
+            "by_category": "Photographs by Test Person",
+            "of_category": None,
+            "include_by": True,
+            "include_of": False,
+            "include_ambiguous": True,
+            "article_total": 3,
+            "in_use_total": 2,
+            "missing_category_total": 0,
+            "wikipedia_total": 3,
+            **metrics,
+        }
+        write_review({}, {}, {}, meta, review_path, "markdown")
+        persisted = review_scan_metrics(review_path)
+        for key in VIEWS_METRIC_KEYS:
+            check_equal("pageviews review metric %s" % key, persisted.get(key), metrics[key])
+
+        class RateLimitedViewsClient:
+            def __init__(self):
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            def rest_get(self, url, tries=6):
+                with self.lock:
+                    self.calls += 1
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+
+        limited_uses = {
+            "article-%d" % index: {
+                "wiki": "en.wikipedia.org", "lang": "en",
+                "title": "Rate limited article %d" % index,
+            }
+            for index in range(20)
+        }
+        limited_photos = [("File:Limited.jpg", {
+            "wp": limited_uses, "all_wp": limited_uses,
+        })]
+        limited_cache_path = os.path.join(td, "limited-views.json")
+        cached_months = {month: index + 1
+                         for index, month in enumerate(("2026-05", "2026-06", "2026-07"))}
+        write_views_cache(limited_cache_path, {
+            "version": VIEWS_CACHE_VERSION,
+            "articles": {"en.wikipedia|Rate_limited_article_0": cached_months},
+        })
+        limited_client = RateLimitedViewsClient()
+        limited_metrics = pageviews_metrics(
+            limited_photos, months=3, today=fixed_today,
+            cache_path=limited_cache_path, client=limited_client, workers=4)
+        if limited_client.calls > 4:
+            raise AssertionError("pageviews circuit breaker exceeded worker bound")
+        check_equal("pageviews partial status", limited_metrics["views_status"], "partial")
+        check_equal("pageviews retains cached article", limited_metrics["views_articles_counted"], 1)
+        check_equal("pageviews retains cached total", limited_metrics["views_last_month"], 3)
+        limited_cache = load_views_cache(limited_cache_path)
+        check_equal("pageviews rate limit does not cache invented zeroes",
+                    limited_cache["articles"],
+                    {"en.wikipedia|Rate_limited_article_0": cached_months})
+        check_equal("pageviews failed and deferred cover unavailable articles",
+                    (limited_metrics["views_articles_failed"] +
+                     limited_metrics["views_articles_deferred"]), 19)
+
+        unavailable_client = RateLimitedViewsClient()
+        unavailable_metrics = pageviews_metrics(
+            limited_photos, months=3, today=fixed_today,
+            client=unavailable_client, workers=4)
+        check_equal("pageviews unavailable status", unavailable_metrics["views_status"],
+                    "unavailable")
+        check_equal("pageviews unavailable total is not fabricated zero",
+                    unavailable_metrics["views_last_month"], None)
+        check_equal("pageviews unavailable photos are not assigned zero views",
+                    unavailable_metrics["views_top_photos"], [])
+        if unavailable_client.calls > 4:
+            raise AssertionError("unavailable pageviews exceeded worker bound")
 
 
 def check_zero_candidate_scan_no_review():
@@ -7517,6 +8519,18 @@ def cmd_self_test(args):
                     is_by("{{Information\n|author=Ajay Dixitson\n}}",
                           "TestUser", "Jay Dixit"),
                     False)
+        check_equal("free-text multi-party credit stays ambiguous",
+                    is_by("{{Information\n|author=Someone Else / Test Person\n}}",
+                          "TestUser", "Test Person"),
+                    False)
+        check_equal("retoucher is not photographer",
+                    is_by("{{Information\n|author=Photo by Someone Else; retouched by Test Person\n}}",
+                          "TestUser", "Test Person"),
+                    False)
+        check_equal("cooperative photo credit keeps photographer",
+                    is_by("{{Information\n|author=Photo by Test Person, crop by Someone Else\n}}",
+                          "TestUser", "Test Person"),
+                    True)
         check_equal("subject word boundary positive",
                     name_as_subject("{{Information\n|description=Jay Dixit\n}}",
                                     "Jay Dixit"),
@@ -7547,10 +8561,28 @@ def cmd_self_test(args):
                     score({"article": "Local", "file": "Local.jpg",
                            "width": 1600, "height": 1200}, None),
                     ("P3", "lead image is not on Wikimedia Commons or has no Commons metadata"))
+        check_equal("gap incomplete Commons metadata",
+                    score({"article": "Incomplete", "file": "Incomplete.jpg",
+                           "width": 1600, "height": 1200},
+                          {"artist": "Other", "license": "", "uploaded": ""}),
+                    ("P3", "lead image has incomplete Wikimedia Commons metadata"))
+        check_equal("gap dimensions unavailable",
+                    score({"article": "Unknown", "file": "Unknown.jpg",
+                           "width": 0, "height": 0},
+                          {"artist": "Other", "license": "CC BY-SA 4.0",
+                           "uploaded": "2026-01-01T00:00:00Z"}),
+                    ("P3", "lead image dimensions are unavailable"))
+        check_equal("gap invalid upload date",
+                    score({"article": "Bad date", "file": "Bad.jpg",
+                           "width": 1600, "height": 1200},
+                          {"artist": "Other", "license": "CC BY-SA 4.0",
+                           "uploaded": "not-a-date"}),
+                    ("P3", "lead image upload date is unavailable"))
         check_equal("gap reasonable lead",
                     score({"article": "Fine", "file": "Fine.jpg",
                            "width": 1600, "height": 1200},
-                          {"artist": "Other", "uploaded": ""}),
+                          {"artist": "Other", "license": "CC BY-SA 4.0",
+                           "uploaded": "2026-01-01T00:00:00Z"}),
                     ("P4", "lead image is recent and reasonable"))
 
     run_check("review format preferences", formats, failures)
@@ -7588,6 +8620,7 @@ def cmd_self_test(args):
     run_check("hidden-category scan detection", check_hidden_category_scan, failures)
     run_check("scan routing classification", check_scan_routing, failures)
     run_check("scan Wikipedia reach totals", check_scan_reach_totals, failures)
+    run_check("Wikipedia article pageviews", check_pageviews_metrics, failures)
     run_check("zero-candidate scan guard", check_zero_candidate_scan_no_review, failures)
 
     if failures:
@@ -7834,6 +8867,7 @@ def review_workflow_state():
         state["ambiguous"] = len([item for item in items if not item["target"]])
         state["selected"] = len(parse_approved(review, warn=False))
         all_photos = load_all_photos_cache(review, items)
+        state["has_report"] = all_photos is not None or bool(review_scan_metrics(review).get("snapshot_id"))
         if all_photos is not None:
             state["all_photos_total"] = len(all_photos)
         else:
@@ -8109,6 +9143,18 @@ def interactive_gap_check():
         username=None,
     ))
 
+def interactive_report():
+    review = guided_review_path()
+    if not review:
+        return
+    include_views = prompt_yes_no("Include Wikipedia article pageviews? This can take a few minutes.", False)
+    try:
+        cmd_report(argparse.Namespace(review=review, views=include_views,
+                   views_months=12, format="html", out=None, no_open=False))
+    except SystemExit:
+        return
+
+
 def interactive_menu_actions(state):
     if not state["setup_complete"]:
         primary_value = "settings"
@@ -8142,7 +9188,7 @@ def interactive_menu_actions(state):
                 "Scan again for new photos",
                 "scan_by",
                 "Search again for new photos you've uploaded or that are newly "
-                "used on Wikipedia. Replaces the photos found so far.",
+                "used on Wikipedia. Keeps a dated history and shows what changed.",
             ))
         else:
             actions.append((
@@ -8163,6 +9209,12 @@ def interactive_menu_actions(state):
             "Open a read-only gallery of every photo from the latest scan that appears on Wikipedia.",
         ))
     if primary_value != "settings":
+        if state.get("has_report") or state.get("all_photos_total", 0) > 0:
+            actions.append((
+                "Create a reach report",
+                "report",
+                "Export your photos, articles, languages, optional pageviews, and changes since the previous scan.",
+            ))
         actions.append((
             "Settings",
             "settings",
@@ -8237,7 +9289,7 @@ def interactive_menu_choice():
     return answer
 
 def interactive_choice_action(choice):
-    if choice in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "review", "view_all",
+    if choice in ("self_test", "smoke", "scan_by", "scan_of", "gaps", "report", "review", "view_all",
                   "settings", "start_over", "add", "quit"):
         return choice
     if str(choice).lower() in ("q", "quit", "exit"):
@@ -8269,6 +9321,8 @@ def cmd_interactive(args):
             interactive_scan("of")
         elif action == "gaps":
             interactive_gap_check()
+        elif action == "report":
+            interactive_report()
         elif action == "review":
             interactive_review()
         elif action == "view_all":
@@ -8312,8 +9366,18 @@ def main():
     i = sub.add_parser("interactive", help="start the guided command-line app")
     i.set_defaults(func=cmd_interactive)
 
+    report = sub.add_parser("report", help="export a dated reach report from your complete photo gallery")
+    report.add_argument("review", nargs="?", help="review file from the scan")
+    report.add_argument("--views", action="store_true", help="include article pageviews (read-only)")
+    report.add_argument("--views-months", type=views_months_arg, default=12, metavar="N")
+    report.add_argument("--format", choices=("html", "json", "csv"), default="html")
+    report.add_argument("--out", help="new output file; existing files are never overwritten")
+    report.add_argument("--no-open", action="store_true", help="save HTML without opening a browser")
+    report.set_defaults(func=cmd_report)
+
     s = sub.add_parser("scan", help="find your photos and write review.md")
-    s.add_argument("--username"); s.add_argument("--author")
+    s.add_argument("--username", help="Wikimedia Commons account (defaults to saved settings)")
+    s.add_argument("--author", help="credited photographer name (defaults to saved settings)")
     s.add_argument("--by-category", dest="by_category")
     s.add_argument("--of-category", dest="of_category")
     s.add_argument("--qid")
@@ -8328,6 +9392,10 @@ def main():
                    help="how many source hops to follow when tracing derivatives (default: 2)")
     s.add_argument("--english-only", action="store_true", default=None)
     s.add_argument("--min-uses", type=int, default=None)
+    s.add_argument("--views", action="store_true",
+                   help="fetch article pageviews for the photos found by this scan")
+    s.add_argument("--views-months", type=views_months_arg, default=12, metavar="N",
+                   help="complete months of pageviews to fetch with --views (1-24; default: 12)")
     s.add_argument("--review-format", choices=["markdown", "md", "org"],
                    help="review format override (default markdown; %s can set org)" %
                    PREFERENCE_FILE)

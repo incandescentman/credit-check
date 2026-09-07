@@ -72,6 +72,25 @@ After Credit Check finds your photos, it opens a photo picker in a browser. You 
 
 When you're done, you can also start over with a different photographer.
 
+* Share your Wikipedia reach
+
+Choose ~Create a reach report~ in the guided app to export your complete photo gallery, its Wikipedia articles and language editions, and changes since your previous matching scan. You can optionally include the last 12 complete months of article pageviews. The HTML report opens in your browser and can be saved as a PDF using Print. It includes links to the photographs and the articles that use them.
+
+The report counts views of Wikipedia articles carrying your photographs, rather than views of the image files. Shared articles count once in the overall total. If the pageview service is unavailable or returns only some results, the report says so; missing measurements are never presented as measured zeroes.
+
+Each new scan keeps a dated snapshot and preserves the previous review before replacing it. Comparisons use the same photographer and scan settings, so a filter change cannot masquerade as newly added or removed placements. Older saved reviews without a recorded scan date retain that uncertainty. Local history and reports stay on your computer.
+
+Direct commands are available too:
+
+#+begin_src sh
+credit-check report
+credit-check report --views --views-months 12
+credit-check report --format json --out /full/path/reach-report.json
+credit-check report --format csv --out /full/path/photo-article-placements.csv
+#+end_src
+
+The CSV contains one row per photograph and article placement. Existing export files are never overwritten.
+
 * Important: Create a Wikimedia Commons bot password
 
 Editing needs a login. Don't use your main password. Instead, create a bot password, a scoped, revocable app password for your own Wikimedia Commons account. Here's how to do that:
@@ -134,7 +153,7 @@ WikiPortraits is a global network of volunteer photographers on a mission to del
 
 Wikipedia and its sister Wikimedia projects require freely licensed images, but most published photos of notable people are press shots under full copyright, so countless biographies are stuck with low-quality photos or none at all. WikiPortraits changes that: our volunteer photographers go where notable people gather — film festivals, conferences, and award ceremonies — often as credentialed press. At many events we also run a photo booth, where anyone with a Wikipedia page, speaker or not, can drop by for a portrait. Every shot is freely licensed, uploaded to Wikimedia Commons, and free for the world to use.
 
-Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia articles in over 150 languages, viewed more than 150 million times a month. Among the events our photographers have captured: Sundance Film Festival, SXSW, Cannes Film Festival, Edinburgh Festival Fringe, Venice Film Festival, Toronto International Film Festival, the Nobel Prizes, CES, and the Pulitzer Prizes.
+Since our first shoot at Sundance in 2024, our portraits have reached Wikipedia articles in over 150 languages. Project-wide reporting from GLAMorgan puts those Wikipedia articles at more than 150 million views a month. Among the events our photographers have captured: Sundance Film Festival, SXSW, Cannes Film Festival, Edinburgh Festival Fringe, Venice Film Festival, Toronto International Film Festival, the Nobel Prizes, CES, and the Pulitzer Prizes.
 
 * Author
 
@@ -208,7 +227,9 @@ For advanced users, Credit Check also supports direct commands for each step of 
 
 The guided app already collects the ordinary details it needs and saves them for this folder. You do not need environment variables for the normal flow.
 
-If you're scripting direct commands, you can provide the same identity values as flags (=--username=, =--author=, and so on) or as environment variables:
+The direct =scan= command automatically reuses the identity that the guided app saved for this folder in [[file:.credit-check.json][.credit-check.json]]. You can override any saved value with an environment variable or a command-line flag; the precedence is flag → environment → saved preference → default.
+
+For scripts that should not depend on the current folder's saved settings, provide the identity values as flags (=--username=, =--author=, and so on) or as environment variables:
 
 : export WIKI_USERNAME='Jaydixit'        # your Wikimedia Commons account
 : export WIKI_AUTHOR='Jay Dixit'         # your name as it appears in author fields
@@ -219,7 +240,7 @@ Optional extras:
 : export WIKI_OF_CATEGORY='Jay Dixit'                  # category for photos of you
 : export WIKI_QID='Q12345'                             # your Wikidata id, enables depicts detection
 
-Direct-command users can also put advanced defaults in [[file:.credit-check.json][.credit-check.json]]. This is optional; the guided app manages ordinary settings for you.
+Direct-command users can also put advanced defaults in [[file:.credit-check.json][.credit-check.json]]. This is optional; the guided app manages ordinary identity settings for you.
 
 #+begin_src json
 {
@@ -251,6 +272,22 @@ This searches Wikimedia Commons, checks Wikipedia usage, classifies each file, a
 The scan only puts photos in the review when they are missing the category it would add. If one of your photos is already in your photographer category, it is left out of =review.md=. When you run the direct =commit --go= step, Credit Check checks again and skips any page where the category is already present.
 
 By default, any photo live on at least one Wikipedia article is eligible. Crop tracing is on by default too, following up to two source links so a crop-of-a-crop can still be connected to your original.
+
+**** Add Wikipedia article views
+
+Add =--views= when you need a current reach figure for a credential letter, press pitch, or impact report:
+
+: credit-check scan --views
+
+Credit Check already knows every Wikipedia article that carries each photo, so this optional step asks the Wikimedia pageviews API for those articles and reports their combined reach. It counts views of the Wikipedia articles that carry your photos, not requests for the image files themselves. That is the standard GLAM meaning behind wording such as photos that "reach" a given number of views.
+
+The default window is the 12 complete calendar months ending with the last complete UTC month. Use =--views-months N= to request from 1 through 24 months. The current partial month is never included.
+
+: Views: 4,120,338 last month (2026-07), 38,207,911 over 12 months, across 1,429 articles (3 no data, 0 failed).
+
+Overall totals count each distinct Wikipedia article once, even if it carries more than one of your photos. In the per-photo top ten, however, an article that carries two of your photos contributes its full article views to both photos. The browser reach ledger shows the last complete month, the full window, monthly totals, and links to the ten photos with the most article views in the last month.
+
+Results are cached beside the review files in [[file:.credit-check-views.json][.credit-check-views.json]]. Credit Check reuses an article only when the cache contains every requested month; otherwise it refreshes that article's complete window. A normal scan without =--views= does not read, write, or report pageviews.
 
 *** 2. Review and pick photos
 

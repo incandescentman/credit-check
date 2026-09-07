@@ -8,6 +8,16 @@ review.org
 # Generated data for the read-only all-photos gallery
 .credit-check-all-photos.json
 
+# Cached article pageviews for opt-in reach metrics
+.credit-check-views.json
+
+# Immutable local scan history and personal reach exports
+.credit-check-history/
+credit-check-report-*.html
+credit-check-report-*.json
+credit-check-report-*.csv
+reports/
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]

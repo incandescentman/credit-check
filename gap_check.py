@@ -168,17 +168,22 @@ def score(entry, detail, credit_names=()):
         return "YOURS", "lead image is already yours"
 
     pixels = entry.get("width", 0) * entry.get("height", 0)
+    if not pixels:
+        return "P3", "lead image dimensions are unavailable"
     if pixels and pixels < LOWRES_PIXELS:
         return "P2", f"lead image is only {entry['width']}x{entry['height']}"
 
-    if detail["uploaded"]:
-        try:
-            up = datetime.fromisoformat(detail["uploaded"].replace("Z", "+00:00"))
-            years = (datetime.now(timezone.utc) - up).days / 365.25
-            if years >= STALE_YEARS:
-                return "P3", f"lead image is {years:.0f} years old"
-        except ValueError:
-            pass
+    if not detail.get("artist") or not detail.get("license"):
+        return "P3", "lead image has incomplete Wikimedia Commons metadata"
+    try:
+        up = datetime.fromisoformat(detail.get("uploaded", "").replace("Z", "+00:00"))
+        if up.tzinfo is None:
+            raise ValueError("timestamp has no timezone")
+    except (TypeError, ValueError):
+        return "P3", "lead image upload date is unavailable"
+    years = (datetime.now(timezone.utc) - up).days / 365.25
+    if years >= STALE_YEARS:
+        return "P3", f"lead image is {years:.0f} years old"
 
     return "P4", "lead image is recent and reasonable"
 
