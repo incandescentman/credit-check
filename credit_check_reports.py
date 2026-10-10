@@ -391,7 +391,8 @@ def render_reach_report(snapshot, comparison=None, title=None):
         explanation = ('<p class="note">These are actual requests for your image files across all referring sites. '
                        'They count user-classified traffic, which excludes identified automated traffic, but may include preloads. '
                        'They are not unique people or verified visual impressions.</p>')
-        availability = ('<p class="note">Photos measured: %s of %s. Complete histories: %s of %s. %s coverage: %s of %s. No data: %s. Failed requests: %s. Deferred files: %s. Missing months are omitted; displayed totals sum the measurements that are available.</p>' %
+        availability = ('<p class="note">Photos with available measurements, including cached data: %s of %s. Complete histories: %s of %s. %s coverage: %s of %s. Photos with no data returned: %s. Missing months are omitted; displayed totals sum the measurements that are available.</p>'
+                        '<p class="note">Fetch status: %s failed; %s deferred. These photos may already have cached measurements included above; fetch counts are not additional photos.</p>' %
                         tuple(map(_e, (_number(counted), _number(requested), _number(complete), _number(requested),
                                        metrics.get("image_requests_window_end", "Last month"), _number(last_month_counted),
                                        _number(requested), _number(no_data), _number(failed), _number(deferred)))))
@@ -658,7 +659,7 @@ def check_reports(cache_path):
         "html_has_no_script": "<script" not in html_text.casefold(),
         "html_has_image_requests_before_article_views": html_text.find("Image requests") < html_text.find("Article views"),
         "html_has_per_photo_image_requests": "123 image requests" in html_text and "1 of 2 months measured" in html_text,
-        "html_has_coverage": "Photos measured: 2 of %s" % len(items) in html_text and "1999-12 coverage: 1 of %s" % len(items) in html_text,
+        "html_has_coverage": "Photos with available measurements, including cached data: 2 of %s" % len(items) in html_text and "1999-12 coverage: 1 of %s" % len(items) in html_text,
         "csv_has_image_requests": any(row["image_requests_last_month"] == "123" and row["image_requests_months_counted"] == "2"
                                       and row["image_requests_window_start"] == "1999-11" and row["image_requests_referer"] == "all-referers"
                                       for row in csv_rows),

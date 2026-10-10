@@ -75,7 +75,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -4017,6 +4017,7 @@ button.primary:focus-visible {
                       <div class="reach-row"><strong id="image-requests-window-total">—</strong><span class="reach-label" id="image-requests-window-label"></span></div>
                     </div>
                     <p class="scan-changes" id="image-requests-status"></p>
+                    <p class="scan-changes" id="image-requests-fetch-status"></p>
                     <p class="scan-changes">Requests for your image files across all referring sites, using Wikimedia’s user-classified traffic. These can include preloads; they are not unique people or verified visual impressions. Missing months are omitted; partial totals include only available measurements. Image requests include Main Page appearances.</p>
                   </section>
                   <p class="scan-changes" id="pageviews-status" hidden></p>
@@ -4358,7 +4359,8 @@ window.CREDIT_CHECK_GUIDED = __GUIDED_JSON__;
     }
     const qualifier = !available ? "Image requests unavailable. "
       : scanMetrics.image_requests_status === "partial" ? "Partial measurement. " : "";
-    document.getElementById("image-requests-status").textContent = `${qualifier}Photos with measurements: ${scanMetrics.image_requests_files_counted} of ${scanMetrics.image_requests_files_requested}. Complete histories: ${scanMetrics.image_requests_files_complete}. ${scanMetrics.image_requests_window_end} coverage: ${scanMetrics.image_requests_files_last_month}. No image data: ${scanMetrics.image_requests_files_no_data}. Failed: ${scanMetrics.image_requests_files_failed}. Deferred: ${scanMetrics.image_requests_files_deferred}.`;
+    document.getElementById("image-requests-status").textContent = `${qualifier}Photos with available measurements, including cached data: ${scanMetrics.image_requests_files_counted} of ${scanMetrics.image_requests_files_requested}. Complete histories: ${scanMetrics.image_requests_files_complete}. ${scanMetrics.image_requests_window_end} coverage: ${scanMetrics.image_requests_files_last_month}. Photos with no data returned: ${scanMetrics.image_requests_files_no_data}.`;
+    document.getElementById("image-requests-fetch-status").textContent = `Fetch status: ${scanMetrics.image_requests_files_failed} failed; ${scanMetrics.image_requests_files_deferred} deferred. These photos may already have cached measurements included above; fetch counts are not additional photos.`;
   }
   if (hasPageviews) {
     pageviewsReach.hidden = false;
@@ -5264,20 +5266,6 @@ def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mod
                     revision = data.get("revision")
                     if revision is not None:
                         revision = int(revision)
-                        if revision <= self.server.review_client_revision:
-                            current_items = parse_review_items(review)
-                            selected_count = len([
-                                item for item in current_items
-                                if item["target"] and item["checked"]
-                            ])
-                            self.server.saved_count = selected_count
-                            self.send_json(409, {
-                                "ok": False,
-                                "selected": selected_count,
-                                "stale": True,
-                                "error": "This browser tab is out of date. Reload it before saving.",
-                            })
-                            return
 
                     current_items = parse_review_items(review)
                     if review_items_signature(current_items) != self.server.review_signature:
@@ -5294,7 +5282,26 @@ def review_web_handler(review, items, approvable, ambiguous_count=0, initial_mod
                         if line not in allowed_lines:
                             raise ValueError("Unknown review item line: %s" % line)
                         selected.add(line)
-                    set_review_approvals(review, current_items, selected)
+                    current_selected = {
+                        item["line"] for item in current_approvable if item["checked"]
+                    }
+                    # Autosave, unload beacons, and Continue can send the same
+                    # revision. Accept an exact repeat, but never an older state
+                    # or different selections claiming an already-saved revision.
+                    if revision is not None and (
+                            revision < self.server.review_client_revision or
+                            (revision == self.server.review_client_revision and
+                             selected != current_selected)):
+                        self.server.saved_count = len(current_selected)
+                        self.send_json(409, {
+                            "ok": False,
+                            "selected": len(current_selected),
+                            "stale": True,
+                            "error": "This browser tab is out of date. Reload it before saving.",
+                        })
+                        return
+                    if selected != current_selected:
+                        set_review_approvals(review, current_items, selected)
                     self.server.review_signature = review_items_signature(
                         parse_review_items(review))
                     if revision is not None:
@@ -6014,7 +6021,7 @@ def cmd_scan(args):
         if image_total is None:
             print("Image requests unavailable: no photos had a measurement for this period.", file=sys.stderr)
         else:
-            print("%sImage requests: %s in %s; %s over %d months. Photos with measurements: %d of %d." % (
+            print("%sImage requests: %s in %s; %s over %d months. Photos with available measurements, including cached data: %d of %d." % (
                 "Partial measurement — " if reach_metrics["image_requests_status"] == "partial" else "",
                 (format(reach_metrics["image_requests_last_month"], ",") if reach_metrics["image_requests_last_month"] is not None else "unavailable"), reach_metrics["image_requests_window_end"],
                 format(image_total, ","), reach_metrics["image_requests_window_months"],
@@ -6024,8 +6031,9 @@ def cmd_scan(args):
             reach_metrics["image_requests_files_complete"], reach_metrics["image_requests_files_requested"],
             reach_metrics["image_requests_window_end"], reach_metrics["image_requests_files_last_month"],
             reach_metrics["image_requests_files_requested"]), file=sys.stderr)
-        print("Incomplete or missing image data: %d. Failed: %d. Deferred: %d." % (
-            reach_metrics["image_requests_files_no_data"], reach_metrics["image_requests_files_failed"],
+        print("Photos with no data returned: %d." % reach_metrics["image_requests_files_no_data"], file=sys.stderr)
+        print("Fetch status: %d failed; %d deferred. These photos may already have cached measurements included above; fetch counts are not additional photos." % (
+            reach_metrics["image_requests_files_failed"],
             reach_metrics["image_requests_files_deferred"]), file=sys.stderr)
         print("Your Main Page placements stay listed but are excluded from article-view totals because a brief appearance can inflate them. Image requests include those placements.", file=sys.stderr)
         print("Main Pages excluded: %d. Main Page lookups failed: %d. Article views deferred: %d." % (
@@ -8233,6 +8241,25 @@ def check_web_review_save():
             initial_page, initial_token, initial_revision = page_state()
             if '"checked": false' not in initial_page:
                 raise AssertionError("initial browser did not render unselected state")
+
+            def post_selection(token, revision, selected, close=False):
+                request = urllib.request.Request(
+                    server.review_origin + "/save",
+                    data=json.dumps({
+                        "token": token, "revision": revision,
+                        "selected_lines": selected, "close": close,
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                try:
+                    response = urllib.request.urlopen(request, timeout=5)
+                except urllib.error.HTTPError as error:
+                    response = error
+                with response:
+                    return response.status, json.loads(response.read().decode("utf-8"))
+
+            check_equal("unchanged initial browser save",
+                        post_selection(initial_token, initial_revision, [])[0], 200)
             body = json.dumps({
                 "selected_lines": [approvable[0]["line"]],
                 "close": False,
@@ -8248,6 +8275,21 @@ def check_web_review_save():
                 data = json.loads(resp.read().decode("utf-8"))
             check_equal("web save without origin response", data["ok"], True)
             check_equal("web save without origin selections",
+                        parse_approved(path, warn=False),
+                        [("File:Example.jpg", "Photographs by Test Person")])
+
+            saved_stat = os.stat(path)
+            check_equal("duplicate autosave accepted",
+                        post_selection(initial_token, initial_revision + 1,
+                                       [approvable[0]["line"]]),
+                        (200, {"ok": True, "selected": 1}))
+            check_equal("duplicate autosave does not rewrite file",
+                        os.stat(path).st_mtime_ns, saved_stat.st_mtime_ns)
+            check_equal("equal revision with different selections rejected",
+                        post_selection(initial_token, initial_revision + 1, [])[0], 409)
+            check_equal("older revision rejected",
+                        post_selection(initial_token, initial_revision, [])[0], 409)
+            check_equal("rejected revisions preserve selections",
                         parse_approved(path, warn=False),
                         [("File:Example.jpg", "Photographs by Test Person")])
 
@@ -8301,6 +8343,10 @@ def check_web_review_save():
             check_equal("stale browser revision reports failure", data.get("ok"), False)
             check_equal("stale browser revision kept selections",
                         parse_approved(path, warn=False), [])
+
+            check_equal("autosave before Continue",
+                        post_selection(reloaded_token, reloaded_revision + 2,
+                                       [approvable[0]["line"]])[0], 200)
 
             body = json.dumps({
                 "selected_lines": [approvable[0]["line"]],
@@ -8659,6 +8705,34 @@ def check_image_requests_metrics():
             stopped = image_requests_metrics([(title, {}), (other, {})], 1, fixed_today, client=ImageClient(code))
             check_equal("images circuit breaker failed", stopped["image_requests_files_failed"], 1)
             check_equal("images circuit breaker deferred", stopped["image_requests_files_deferred"], 1)
+        # Coverage and fetch outcomes overlap when an incomplete cache survives
+        # a failed refresh. Never discard measurements or suppress fetch errors.
+        partial_cache = os.path.join(td, "partial-history.json")
+        write_views_cache(partial_cache, {
+            "version": 1, "referer": "all-referers", "agent": "user", "files": {
+                image_requests_file_path(title): {"2026-07": 10},
+                image_requests_file_path(other): {"2026-07": 20},
+            },
+        })
+        class FailedRefresh:
+            def __init__(self, code):
+                self.code = code
+                self.calls = 0
+
+            def rest_get(self, url, tries=1):
+                self.calls += 1
+                raise urllib.error.HTTPError(url, self.code, "refresh failed", {}, None)
+
+        for code in (429, 503, 500):
+            refresh = FailedRefresh(code)
+            retained = image_requests_metrics([(title, {}), (other, {})], 2,
+                                             fixed_today, partial_cache, refresh)
+            check_equal("partial cache retains both photos", retained["image_requests_files_counted"], 2)
+            check_equal("partial cache total counted once", retained["image_requests_window_total"], 30)
+            check_equal("partial cache missing August stays unknown", retained["image_requests_last_month"], None)
+            check_equal("partial cache failure remains visible", retained["image_requests_files_failed"], 2 if code == 500 else 1)
+            check_equal("partial cache deferred remains visible", retained["image_requests_files_deferred"], 0 if code == 500 else 1)
+            check_equal("partial cache per-photo sum", sum(p["window_total"] for p in retained["image_requests_photos"]), 30)
         meta = {"author": "Jay Dixit", "by_category": "Photographs by Jay Dixit", "of_category": None, **metrics}
         for writer, ext in ((write_markdown, ".md"), (write_org, ".org")):
             review = os.path.join(td, "review" + ext)
