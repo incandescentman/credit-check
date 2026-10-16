@@ -3,6 +3,13 @@
 
 * Unreleased
 
+* v1.3.2 — October 16, 2026
+
+** Fixed
+
+- Fixed broken output pipes producing shutdown warnings or tracebacks. The CLI now catches buffered output failures before exiting and closes quietly with status 1 when the output pipe has closed.
+- Added regression checks for normal version output and closed pipes during help, version, and command output.
+
 * v1.3.1 — October 10, 2026
 
 ** Fixed

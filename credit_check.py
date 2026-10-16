@@ -75,7 +75,7 @@ except ImportError:
 
 API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 UA = ("credit-check/%s (https://github.com/incandescentman/credit-check; "
       "jay@wikiportraits.org)" % __version__)
 TITLE_BATCH = 50
@@ -9075,6 +9075,46 @@ def check_zero_candidate_scan_no_review():
         globals()["write_review"] = old_write_review
         os.chdir(old_cwd)
 
+def check_cli_broken_pipe():
+    import subprocess
+
+    script = os.path.abspath(__file__)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    env.pop("PYTHONUNBUFFERED", None)
+    normal = subprocess.run(
+        [sys.executable, script, "--version"], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=env, timeout=10)
+    check_equal("CLI normal exit", normal.returncode, 0)
+    check_equal("CLI normal version", normal.stdout.decode().strip(),
+                "credit-check %s" % __version__)
+    check_equal("CLI normal stderr", normal.stderr, b"")
+
+    # Exercise command dispatch without starting the interactive UI or a scan.
+    command_output = (
+        "import os, sys; "
+        "sys.path.insert(0, os.path.dirname(sys.argv[1])); "
+        "import credit_check; "
+        "credit_check.cmd_interactive = lambda args: print('pipe check'); "
+        "sys.argv = ['credit-check']; credit_check.main()")
+    cases = (
+        ("buffered version", [sys.executable, script, "--version"]),
+        ("buffered help", [sys.executable, script, "--help"]),
+        ("buffered command", [sys.executable, "-c", command_output, script]),
+        ("unbuffered command", [sys.executable, "-u", "-c", command_output, script]),
+    )
+    for label, command in cases:
+        # Close the reader before launch so every write must hit a closed pipe.
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        try:
+            result = subprocess.run(command, stdout=write_fd,
+                                    stderr=subprocess.PIPE, env=env, timeout=10)
+        finally:
+            os.close(write_fd)
+        check_equal("CLI closed-pipe exit " + label, result.returncode, 1)
+        check_equal("CLI closed-pipe stderr " + label, result.stderr, b"")
+
+
 def run_check(name, func, failures):
     try:
         func()
@@ -9187,6 +9227,7 @@ def cmd_self_test(args):
     run_check("local review-format preference file", check_review_preferences, failures)
     run_check("HTTP POST retry policy", check_retry_policy, failures)
     run_check("version and User-Agent identity", check_version_identity, failures)
+    run_check("CLI broken-pipe handling", check_cli_broken_pipe, failures)
     run_check("conflict-safe category writes", check_commit_write_safety, failures)
     run_check("atomic text writes", check_atomic_write_text, failures)
     run_check("photo caption metadata", check_photo_caption_metadata, failures)
@@ -10064,11 +10105,23 @@ def main():
                    help="your Wikimedia Commons username (defaults to saved settings)")
     g.set_defaults(func=cmd_gaps)
 
-    args = ap.parse_args()
     try:
-        args.func(args)
+        try:
+            args = ap.parse_args()
+            args.func(args)
+        except SystemExit:
+            # argparse exits for --help and --version before command dispatch.
+            sys.stdout.flush()
+            raise
+        # Catch output errors before Python's final stdout flush at shutdown.
+        sys.stdout.flush()
     except BrokenPipeError:
-        pass
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+        raise SystemExit(1)
     except KeyboardInterrupt:
         sys.exit(130)
 
